@@ -1,5 +1,5 @@
-# drovr — cheap Claude Code workers on DeepSeek, run headless.
-# DROVR_ALLOWED (newline-separated repo roots) is prepended by drovr.nix.
+# drovr — hand tasks to headless Claude Code workers on Anthropic-compatible backends.
+# DROVR_ALLOWED, DROVR_PROVIDERS and DROVR_DEFAULT are prepended by drovr.nix.
 
 state_root="${XDG_STATE_HOME:-$HOME/.local/state}/drovr"
 
@@ -7,11 +7,12 @@ die() { echo "drovr: $*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-usage: drovr run <name> [--edit] <task> [-- <claude args>...]
+usage: drovr run <name> [--edit] [--via <provider>] <task> [-- <claude args>...]
        drovr prompt <name> <text>      follow-up turn in the same session
        drovr wait <name> [seconds]     block until the turn ends (default: no limit)
        drovr read <name>               print the worker's final answer
        drovr list
+       drovr providers
        drovr rm <name>                 drop the worker (and its worktree, if clean)
 EOF
   exit 2
@@ -32,26 +33,33 @@ allowed() {
   return 1
 }
 
-# launch <dir> <worker-state> <claude args...>: one headless turn, detached so it
+# launch <dir> <worker-state> <provider> <claude args...>: one headless turn, detached so it
 # outlives the calling shell (Claude's Bash tool reaps its children).
 launch() {
-  local cwd="$1" w="$2"
-  shift 2
+  local cwd="$1" w="$2" via="$3"
+  shift 3
   rm -f "$w/exit"
   # shellcheck disable=SC2016 # expanded by the inner bash, on purpose
   setsid -f bash -c '
     cd "$1" || exit 1
-    w="$2"; shift 2
-    env -u WEZTERM_PANE claude-ds -p "$@" --output-format json >"$w/out.json" 2>"$w/err.log"
+    w="$2"; via="$3"; shift 3
+    env -u WEZTERM_PANE "claude-$via" -p "$@" --output-format json >"$w/out.json" 2>"$w/err.log"
     echo $? >"$w/exit"
-  ' drovr-worker "$cwd" "$w" "$@"
+  ' drovr-worker "$cwd" "$w" "$via" "$@"
 }
 
 cmd_run() {
-  local name="${1:-}" edit=0 task
+  local name="${1:-}" edit=0 via="$DROVR_DEFAULT" task
   [ -n "$name" ] || usage
   shift
-  if [ "${1:-}" = "--edit" ]; then edit=1; shift; fi
+  while :; do
+    case "${1:-}" in
+      --edit) edit=1; shift ;;
+      --via) via="${2:-}"; shift 2 || usage ;;
+      *) break ;;
+    esac
+  done
+  [[ " $DROVR_PROVIDERS " == *" $via "* ]] || die "unknown provider '$via' (have: $DROVR_PROVIDERS)"
   task="${1:-}"
   [ -n "$task" ] || usage
   shift
@@ -76,8 +84,9 @@ cmd_run() {
   printf '%s\n' "$cwd" >"$w/cwd"
   printf '%s\n' "$repo" >"$w/repo"
   printf '%s\n' "$mode" >"$w/mode"
-  launch "$cwd" "$w" "$task" --permission-mode "$mode" "$@"
-  echo "drovr: $name started in $cwd ($mode)"
+  printf '%s\n' "$via" >"$w/via"
+  launch "$cwd" "$w" "$via" "$task" --permission-mode "$mode" "$@"
+  echo "drovr: $name started on $via in $cwd ($mode)"
 }
 
 cmd_prompt() {
@@ -88,7 +97,7 @@ cmd_prompt() {
   [ -e "$w/exit" ] || die "'$name' is still running; 'drovr wait $name' first"
   sid="$(jq -r '.session_id // empty' "$w/out.json" 2>/dev/null)"
   [ -n "$sid" ] || die "'$name' has no session to resume (see $w/err.log)"
-  launch "$(cat "$w/cwd")" "$w" "$text" --resume "$sid" --permission-mode "$(cat "$w/mode")"
+  launch "$(cat "$w/cwd")" "$w" "$(cat "$w/via")" "$text" --resume "$sid" --permission-mode "$(cat "$w/mode")"
   echo "drovr: $name resumed"
 }
 
@@ -134,7 +143,7 @@ cmd_list() {
     else
       status="failed($(cat "$w/exit"))"
     fi
-    printf '%-20s %-12s %s\n' "$name" "$status" "$(cat "$w/cwd" 2>/dev/null)"
+    printf '%-20s %-12s %-10s %s\n' "$name" "$status" "$(cat "$w/via" 2>/dev/null)" "$(cat "$w/cwd" 2>/dev/null)"
   done
 }
 
@@ -159,6 +168,7 @@ case "${1:-}" in
   wait) shift; cmd_wait "$@" ;;
   read) shift; cmd_read "$@" ;;
   list) cmd_list ;;
+  providers) echo "$DROVR_PROVIDERS (default: $DROVR_DEFAULT)" ;;
   rm) shift; cmd_rm "$@" ;;
   *) usage ;;
 esac

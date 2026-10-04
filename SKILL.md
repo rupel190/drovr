@@ -1,11 +1,12 @@
 ---
 name: drovr
-description: Delegate mechanical, well-specified tasks to cheap headless Claude Code workers running on DeepSeek via the `drovr` CLI. Use when a task is bulk and checkable (broad searches, codemods, test scaffolding, first-pass reviews, doc sweeps) and the repo is on the allowlist. Do not use for judgment-heavy debugging, anything touching secrets, or repos `drovr` refuses.
+description: Hand mechanical, well-specified tasks from this session to headless Claude Code workers on cheaper Anthropic-compatible backends (DeepSeek by default) via the `drovr` CLI. Use when a task is bulk and checkable (broad searches, codemods, test scaffolding, first-pass reviews, doc sweeps) and the repo is on the allowlist. Do not use for judgment-heavy debugging, anything touching secrets, or repos drovr refuses.
 ---
 
 # drovr
 
-A worker is the same `claude` CLI pointed at DeepSeek (`claude-ds`), run headless.
+A worker is the same `claude` CLI pointed at another provider's Anthropic-compatible
+endpoint (`claude-<provider>`), run headless.
 It shares your settings, hooks and permission rules, but not your context: write
 the task so it stands alone.
 
@@ -14,6 +15,7 @@ the task so it stands alone.
 ```bash
 drovr run <name> "<task>"            # read-only: edits and unapproved tools are denied
 drovr run <name> --edit "<task>"     # own git worktree + branch drovr/<name>, edits auto-accepted
+drovr run <name> --via <p> "<task>"  # pick a provider; `drovr providers` lists them
 drovr wait <name> 900                # block until the turn ends (seconds; omit = no limit)
 drovr read <name>                    # the worker's final answer
 drovr prompt <name> "<follow-up>"    # next turn in the same session
