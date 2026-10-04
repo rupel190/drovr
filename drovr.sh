@@ -1,18 +1,18 @@
-# cw — cheap Claude Code workers on DeepSeek, run headless.
-# CW_ALLOWED (newline-separated repo roots) is prepended by claude-workers.nix.
+# drovr — cheap Claude Code workers on DeepSeek, run headless.
+# DROVR_ALLOWED (newline-separated repo roots) is prepended by drovr.nix.
 
-state_root="${XDG_STATE_HOME:-$HOME/.local/state}/cw"
+state_root="${XDG_STATE_HOME:-$HOME/.local/state}/drovr"
 
-die() { echo "cw: $*" >&2; exit 1; }
+die() { echo "drovr: $*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-usage: cw run <name> [--edit] <task> [-- <claude args>...]
-       cw prompt <name> <text>      follow-up turn in the same session
-       cw wait <name> [seconds]     block until the turn ends (default: no limit)
-       cw read <name>               print the worker's final answer
-       cw list
-       cw rm <name>                 drop the worker (and its worktree, if clean)
+usage: drovr run <name> [--edit] <task> [-- <claude args>...]
+       drovr prompt <name> <text>      follow-up turn in the same session
+       drovr wait <name> [seconds]     block until the turn ends (default: no limit)
+       drovr read <name>               print the worker's final answer
+       drovr list
+       drovr rm <name>                 drop the worker (and its worktree, if clean)
 EOF
   exit 2
 }
@@ -28,7 +28,7 @@ allowed() {
     [ -n "$root" ] || continue
     root="${root%/}"
     [[ "$repo" == "$root" || "$repo" == "$root"/* ]] && return 0
-  done <<<"$CW_ALLOWED"
+  done <<<"$DROVR_ALLOWED"
   return 1
 }
 
@@ -44,7 +44,7 @@ launch() {
     w="$2"; shift 2
     env -u WEZTERM_PANE claude-ds -p "$@" --output-format json >"$w/out.json" 2>"$w/err.log"
     echo $? >"$w/exit"
-  ' cw-worker "$cwd" "$w" "$@"
+  ' drovr-worker "$cwd" "$w" "$@"
 }
 
 cmd_run() {
@@ -59,15 +59,15 @@ cmd_run() {
 
   local w repo cwd mode
   w="$(worker_dir "$name")"
-  [ ! -e "$w" ] || die "worker '$name' exists; 'cw rm $name' first"
+  [ ! -e "$w" ] || die "worker '$name' exists; 'drovr rm $name' first"
   repo="$(git rev-parse --show-toplevel 2>/dev/null)" || die "not inside a git repo"
-  allowed "$repo" || die "$repo is not in my.claude.workers.allowedRepos"
+  allowed "$repo" || die "$repo is not in my.claude.drovr.allowedRepos"
 
   mkdir -p "$w"
   if [ "$edit" = 1 ]; then
     # Own worktree: a worker never edits the checkout you (or another session) work in.
     cwd="$w/wt"
-    git -C "$repo" worktree add -q -b "cw/$name" "$cwd" || { rm -rf "$w"; die "worktree add failed"; }
+    git -C "$repo" worktree add -q -b "drovr/$name" "$cwd" || { rm -rf "$w"; die "worktree add failed"; }
     mode=acceptEdits
   else
     cwd="$PWD"
@@ -77,7 +77,7 @@ cmd_run() {
   printf '%s\n' "$repo" >"$w/repo"
   printf '%s\n' "$mode" >"$w/mode"
   launch "$cwd" "$w" "$task" --permission-mode "$mode" "$@"
-  echo "cw: $name started in $cwd ($mode)"
+  echo "drovr: $name started in $cwd ($mode)"
 }
 
 cmd_prompt() {
@@ -85,11 +85,11 @@ cmd_prompt() {
   [ -n "$name" ] && [ -n "$text" ] || usage
   w="$(worker_dir "$name")"
   [ -d "$w" ] || die "no worker '$name'"
-  [ -e "$w/exit" ] || die "'$name' is still running; 'cw wait $name' first"
+  [ -e "$w/exit" ] || die "'$name' is still running; 'drovr wait $name' first"
   sid="$(jq -r '.session_id // empty' "$w/out.json" 2>/dev/null)"
   [ -n "$sid" ] || die "'$name' has no session to resume (see $w/err.log)"
   launch "$(cat "$w/cwd")" "$w" "$text" --resume "$sid" --permission-mode "$(cat "$w/mode")"
-  echo "cw: $name resumed"
+  echo "drovr: $name resumed"
 }
 
 cmd_wait() {
@@ -99,13 +99,13 @@ cmd_wait() {
   [ -d "$w" ] || die "no worker '$name'"
   until [ -e "$w/exit" ]; do
     if [ "$limit" -gt 0 ] && [ "$waited" -ge "$limit" ]; then
-      echo "cw: $name still running after ${limit}s" >&2
+      echo "drovr: $name still running after ${limit}s" >&2
       exit 124
     fi
     sleep 1
     waited=$((waited + 1))
   done
-  echo "cw: $name finished (exit $(cat "$w/exit"))"
+  echo "drovr: $name finished (exit $(cat "$w/exit"))"
 }
 
 cmd_read() {
@@ -114,7 +114,7 @@ cmd_read() {
   w="$(worker_dir "$name")"
   [ -e "$w/exit" ] || die "'$name' has not finished"
   if ! jq -e -r '.result' "$w/out.json" 2>/dev/null; then
-    echo "cw: no result; stderr follows" >&2
+    echo "drovr: no result; stderr follows" >&2
     cat "$w/err.log" >&2
     exit 1
   fi
@@ -147,10 +147,10 @@ cmd_rm() {
   if [ -d "$w/wt" ]; then
     # No --force: uncommitted worker edits stop the removal instead of vanishing.
     git -C "$(cat "$w/repo")" worktree remove "$w/wt" ||
-      die "worktree has changes; commit or discard them (branch cw/$name stays either way)"
+      die "worktree has changes; commit or discard them (branch drovr/$name stays either way)"
   fi
   rm -rf "$w"
-  echo "cw: removed $name"
+  echo "drovr: removed $name"
 }
 
 case "${1:-}" in
