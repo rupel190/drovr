@@ -3,7 +3,10 @@
 Hand tasks from your Claude Code session to headless Claude Code workers running on
 cheaper Anthropic-compatible backends (DeepSeek, or anything else that speaks the
 Anthropic Messages API). Your main session decides what to delegate, `drovr` starts
-the worker, and the answer comes back as one message.
+the worker, and the answer comes back as one message. The name comes from *drover*:
+someone who drives a herd from one place to another and hands it over at the other
+end. drovr does the same with tasks: it moves them out to cheaper workers and delivers
+the results back, without managing the herd in between.
 
 No daemon, no multiplexer: a worker is `claude -p` with a different `ANTHROPIC_BASE_URL`,
 detached, with its state in `~/.local/state/drovr/<name>/`.
