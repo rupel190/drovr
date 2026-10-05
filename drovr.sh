@@ -34,9 +34,29 @@ allowed() {
   return 1
 }
 
+# public_url <repo>: origin as an anonymous https URL, or nothing.
+public_url() {
+  local url rest
+  url="$(git -C "$1" remote get-url origin 2>/dev/null)" || return 1
+  case "$url" in
+    git@*:*) rest="${url#git@}"; echo "https://${rest/://}" ;;
+    ssh://* | git+ssh://* | https://*) rest="${url#*://}"; echo "https://${rest#*@}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Public = readable with no credentials at all; checked against the remote, not guessed.
+is_public() {
+  local url
+  url="$(public_url "$1")" || return 1
+  GIT_TERMINAL_PROMPT=0 timeout 15 git -c credential.helper= -c core.askPass=true \
+    ls-remote --exit-code "$url" HEAD >/dev/null 2>&1
+}
+
 # DROVR.md at the repo root says what may leave the repo; an optional
 # "providers: a, b" line limits which backends may see it.
 repo_providers() {
+  [ -f "$1/DROVR.md" ] || return 0
   sed -n 's/^providers:[[:space:]]*//p' "$1/DROVR.md" | head -n1 | tr ',' ' '
 }
 
@@ -56,7 +76,7 @@ launch() {
 }
 
 cmd_run() {
-  local name="${1:-}" edit=0 scratch="" via="$DROVR_DEFAULT" task
+  local name="${1:-}" edit=0 scratch="" public=0 via="$DROVR_DEFAULT" task
   [ -n "$name" ] || usage
   shift
   while :; do
@@ -90,8 +110,13 @@ cmd_run() {
     extra=(--disallowedTools Bash)
   else
     repo="$(git rev-parse --show-toplevel 2>/dev/null)" || die "not inside a git repo (or use --scratch)"
-    allowed "$repo" || die "$repo is not in my.claude.drovr.allowedRepos (or use --scratch)"
-    [ -f "$repo/DROVR.md" ] || die "$repo has no DROVR.md saying what may leave it (or use --scratch)"
+    if allowed "$repo"; then
+      [ -f "$repo/DROVR.md" ] || die "$repo has no DROVR.md saying what may leave it (or use --scratch)"
+    elif is_public "$repo"; then
+      public=1
+    else
+      die "$repo is neither public nor in my.claude.drovr.allowedRepos (or use --scratch)"
+    fi
     local only
     only="$(repo_providers "$repo")"
     [ -z "$only" ] || [[ " $only " == *" $via "* ]] || die "$repo allows only: $only"
@@ -100,10 +125,22 @@ cmd_run() {
   mkdir -p "$w"
   if [ -n "$scratch" ]; then
     :
+  elif [ "$public" = 1 ]; then
+    # Public repo: only what is pushed is public, so work from a fresh checkout of the
+    # remote's default branch, never from your tree (unpushed work, ignored files).
+    cwd="$w/wt"
+    git -C "$repo" fetch -q origin HEAD || { rm -rf "$w"; die "fetch from origin failed"; }
+    if [ "$edit" = 1 ]; then
+      git -C "$repo" worktree add -q -b "drovr-$name" "$cwd" FETCH_HEAD || { rm -rf "$w"; die "worktree add failed"; }
+      mode=acceptEdits
+    else
+      git -C "$repo" worktree add -q --detach "$cwd" FETCH_HEAD || { rm -rf "$w"; die "worktree add failed"; }
+      mode=default
+    fi
   elif [ "$edit" = 1 ]; then
     # Own worktree: a worker never edits the checkout you (or another session) work in.
     cwd="$w/wt"
-    git -C "$repo" worktree add -q -b "drovr/$name" "$cwd" || { rm -rf "$w"; die "worktree add failed"; }
+    git -C "$repo" worktree add -q -b "drovr-$name" "$cwd" || { rm -rf "$w"; die "worktree add failed"; }
     mode=acceptEdits
   else
     cwd="$PWD"
@@ -115,7 +152,7 @@ cmd_run() {
   printf '%s\n' "$via" >"$w/via"
   [ "${#extra[@]}" -eq 0 ] || printf '%s\n' "${extra[@]}" >"$w/extra"
   launch "$cwd" "$w" "$via" "$task" --permission-mode "$mode" "${extra[@]}" "$@"
-  echo "drovr: $name started on $via in $cwd ($mode)"
+  echo "drovr: $name started on $via in $cwd ($mode$([ "$public" = 0 ] || echo ", public: pushed content only"))"
 }
 
 cmd_prompt() {
@@ -187,7 +224,7 @@ cmd_rm() {
   if [ -d "$w/wt" ]; then
     # No --force: uncommitted worker edits stop the removal instead of vanishing.
     git -C "$(cat "$w/repo")" worktree remove "$w/wt" ||
-      die "worktree has changes; commit or discard them (branch drovr/$name stays either way)"
+      die "worktree has changes; commit or discard them (branch drovr-$name stays either way)"
   fi
   rm -rf "$w"
   echo "drovr: removed $name"

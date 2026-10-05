@@ -1,7 +1,8 @@
 # drovr — hand tasks from your Claude session to headless Claude Code workers on
 # cheaper Anthropic-compatible backends. Each editing worker gets its own git
-# worktree; a repo must be allowlisted and carry a DROVR.md, or the worker gets
-# only a prepared scratch folder. The answer comes back as one message.
+# worktree. Public repos qualify as pushed content only; private ones must be
+# allowlisted with a DROVR.md; otherwise a worker gets only a prepared scratch
+# folder. The answer comes back as one message.
 {
   pkgs,
   lib,
@@ -33,6 +34,8 @@ let
           export ANTHROPIC_DEFAULT_HAIKU_MODEL=${lib.escapeShellArg p.smallModel}
         ''}
         export CLAUDE_WORKER=1
+        # The default (10 retries, growing waits) turns a bad key into minutes of silence.
+        export CLAUDE_CODE_MAX_RETRIES=3
         exec ${claude}/bin/claude "$@"
       '';
     };
