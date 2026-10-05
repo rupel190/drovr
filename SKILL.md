@@ -23,7 +23,7 @@ not limit what it reads; where it runs does. Pick the mode by what may leave.
 | Mode | Worker sees | Allowed when |
 |---|---|---|
 | public repo (`drovr run`, `--edit`) | a worktree of your local HEAD: committed files incl. unpushed commits; not your uncommitted edits, untracked or ignored files | origin answers an anonymous `git ls-remote` (drovr checks); no allowlist or DROVR.md needed |
-| allowlisted repo (`drovr run`, `--edit`) | the same kind of worktree | repo is in `my.claude.drovr.allowedRepos` **and** has a `DROVR.md` that permits this kind of task |
+| allowlisted repo (`drovr run`, `--edit`) | the same kind of worktree | repo is in `programs.drovr.allowedRepos` **and** has a `DROVR.md` that permits this kind of task |
 | scratch (`--scratch <dir>`) | only the folder you prepared, copied into its own state; Bash disabled | anywhere, as long as the brief itself obeys the ground rules |
 
 For scratch: write a self-contained brief into a folder in your scratchpad (task
@@ -35,7 +35,7 @@ description plus only the snippets it needs, already cleaned), then
 
 Never send, in a brief or by running a worker where it can read them:
 - personal data about anyone (names with contact details, addresses, health, finances)
-- credentials, keys, tokens, `.env` contents, agenix plaintext
+- credentials, keys, tokens, `.env` contents, decrypted secrets
 - client or business data (quotes, prices, customer records, contracts)
 - unpublished business logic that is the product itself
 

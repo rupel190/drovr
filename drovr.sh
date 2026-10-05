@@ -3,7 +3,7 @@
 
 state_root="${XDG_STATE_HOME:-$HOME/.local/state}/drovr"
 # One Claude config for every worker and provider: none of your settings, MCP servers,
-# CLAUDE.md or memory reach a worker, and its transcripts stay out of claude-sync.
+# CLAUDE.md or memory reach a worker, and its transcripts stay out of ~/.claude.
 worker_config="${XDG_STATE_HOME:-$HOME/.local/state}/drovr-claude"
 
 # --restricted confines the file tools to the worker's directory and drops every
@@ -121,7 +121,7 @@ cmd_run() {
     elif is_public "$repo"; then
       public=1
     else
-      die "$repo is neither public nor in my.claude.drovr.allowedRepos (or use --scratch)"
+      die "$repo is neither public nor in programs.drovr.allowedRepos (or use --scratch)"
     fi
     local only
     only="$(repo_providers "$repo")"

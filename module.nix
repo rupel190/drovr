@@ -1,28 +1,26 @@
-# drovr — hand tasks from your Claude session to headless Claude Code workers on
+# drovr — hand tasks from your Claude Code session to headless Claude Code workers on
 # cheaper Anthropic-compatible backends. Workers run --restricted with five file tools
 # and an empty config, in a worktree of HEAD (public or allowlisted repos) or a
 # prepared scratch folder. The answer comes back as one message.
 {
   pkgs,
   lib,
-  inputs,
   config,
   ...
 }:
 let
-  cfg = config.my.claude.drovr;
-  claude = inputs.claude-code.packages.${pkgs.stdenv.hostPlatform.system}.default;
+  cfg = config.programs.drovr;
 
-  # One `claude-<name>` per provider: Claude Code pointed at that endpoint. Keys
-  # are read at launch from agenix (modules/core/secrets.nix), never baked in.
+  # One `claude-<name>` per provider: Claude Code pointed at that endpoint. The key is
+  # read from keyFile at launch, never baked into the store.
   mkWrapper =
     name: p:
     pkgs.writeShellApplication {
       name = "claude-${name}";
       text = ''
-        key=/run/agenix/${p.secret}
+        key=${lib.escapeShellArg p.keyFile}
         [ -r "$key" ] || {
-          echo "claude-${name}: $key not readable (ragenix -e secrets/${p.secret}.age, then rebuild)" >&2
+          echo "claude-${name}: $key not readable" >&2
           exit 1
         }
         ${p.authVar}="$(<"$key")"
@@ -35,7 +33,7 @@ let
         export CLAUDE_WORKER=1
         # The default (10 retries, growing waits) turns a bad key into minutes of silence.
         export CLAUDE_CODE_MAX_RETRIES=3
-        exec ${claude}/bin/claude "$@"
+        exec ${lib.getExe cfg.claudePackage} "$@"
       '';
     };
 
@@ -55,7 +53,7 @@ let
       DROVR_PROVIDERS=${lib.escapeShellArg (lib.concatStringsSep " " (lib.attrNames cfg.providers))}
       DROVR_DEFAULT=${lib.escapeShellArg cfg.defaultProvider}
     ''
-    + builtins.readFile ./drovr/drovr.sh;
+    + builtins.readFile ./drovr.sh;
   };
 
   provider = lib.types.submodule {
@@ -63,19 +61,22 @@ let
       baseUrl = lib.mkOption {
         type = lib.types.str;
         description = "Anthropic-compatible endpoint (ANTHROPIC_BASE_URL).";
+        example = "https://api.deepseek.com/anthropic";
       };
       model = lib.mkOption {
         type = lib.types.str;
         description = "Main model id (ANTHROPIC_MODEL).";
+        example = "deepseek-v4-pro";
       };
       smallModel = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
         description = "Background-task model (ANTHROPIC_DEFAULT_HAIKU_MODEL); null keeps the endpoint's own mapping.";
       };
-      secret = lib.mkOption {
+      keyFile = lib.mkOption {
         type = lib.types.str;
-        description = "agenix secret name; read from /run/agenix/<secret>.";
+        description = "File holding the API key, read at launch (e.g. an agenix or sops-nix secret path).";
+        example = "/run/agenix/deepseek-api-key";
       };
       authVar = lib.mkOption {
         type = lib.types.str;
@@ -86,12 +87,14 @@ let
   };
 in
 {
-  options.my.claude.drovr = {
-    # Default-deny: everything a worker reads is sent to its provider.
-    allowedRepos = lib.mkOption {
-      type = lib.types.listOf lib.types.str;
-      default = [ ];
-      description = "Repo roots (and everything under them) where drovr may start workers.";
+  options.programs.drovr = {
+    enable = lib.mkEnableOption "drovr, headless Claude Code workers on Anthropic-compatible backends";
+
+    claudePackage = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.claude-code;
+      defaultText = lib.literalExpression "pkgs.claude-code";
+      description = "Claude Code package the workers run.";
     };
 
     providers = lib.mkOption {
@@ -103,28 +106,34 @@ in
     defaultProvider = lib.mkOption {
       type = lib.types.str;
       default = "deepseek";
+      description = "Provider used when `drovr run` gets no --via.";
+    };
+
+    # Default-deny: everything a worker reads is sent to its provider. Public repos
+    # qualify without being listed.
+    allowedRepos = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      description = "Private repo roots (and everything under them) where drovr may start workers; each also needs a DROVR.md.";
+    };
+
+    installSkill = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Install the drovr skill as ~/.claude/skills/drovr/SKILL.md.";
     };
   };
 
-  config = {
-    # DeepSeek maps claude-opus to v4-pro and haiku/sonnet to flash on its side,
-    # so background calls need no smallModel.
-    my.claude.drovr.providers.deepseek = {
-      baseUrl = "https://api.deepseek.com/anthropic";
-      model = "deepseek-v4-pro";
-      secret = "deepseek-api-key";
-    };
-
+  config = lib.mkIf cfg.enable {
     assertions = [
       {
         assertion = cfg.providers ? ${cfg.defaultProvider};
-        message = "my.claude.drovr.defaultProvider '${cfg.defaultProvider}' is not in my.claude.drovr.providers";
+        message = "programs.drovr.defaultProvider '${cfg.defaultProvider}' is not in programs.drovr.providers";
       }
     ];
 
     home.packages = wrappers ++ [ drovr ];
 
-    # claude-sync excludes this path: the store symlink must not reach cordyceps.
-    home.file.".claude/skills/drovr/SKILL.md".source = ./drovr/SKILL.md;
+    home.file.".claude/skills/drovr/SKILL.md" = lib.mkIf cfg.installSkill { source = ./SKILL.md; };
   };
 }
