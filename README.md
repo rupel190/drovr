@@ -72,3 +72,7 @@ drovr path <name> | drovr list | drovr providers | drovr rm <name>
 The bundled skill (installed to `~/.claude/skills/drovr`, disable with
 `installSkill = false`) teaches the main session the modes, the ground rules for what
 never leaves, and to use drovr only when asked.
+
+## License
+
+GPL-3.0-only. See [LICENSE](LICENSE).
