@@ -203,7 +203,7 @@ cmd_run() {
 
 cmd_prompt() {
   local name="${1:-}" text="${2:-}" w sid
-  [ -n "$name" ] && [ -n "$text" ] || usage
+  [[ -n "$name" && -n "$text" ]] || usage
   w="$(worker_dir "$name")"
   [ -d "$w" ] || die "no worker '$name'"
   [ -e "$w/exit" ] || die "'$name' is still running; 'drovr wait $name' first"
