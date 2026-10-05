@@ -1,8 +1,8 @@
 # drovr
 
-Hand tasks from your Claude Code session to headless Claude Code workers on cheaper
-Anthropic-compatible backends, such as DeepSeek. Named after a *drover*, who moves a
-herd to its destination and hands it over: drovr moves tasks out and brings results back.
+drovr hands tasks from your Claude Code session to headless workers on cheaper
+Anthropic-compatible backends like DeepSeek. Named after a *drover*, who moves a herd to
+its destination and hands it over: drovr moves tasks out and brings results back.
 
 A worker is `claude -p` pointed at another `ANTHROPIC_BASE_URL`. No daemon, no multiplexer.
 
@@ -49,8 +49,13 @@ drovr run <name> [--edit | --scratch <dir>] [--via <provider>] "<task>"
 drovr wait <name> [seconds]
 drovr read <name>        # answer, then any denied tool calls
 drovr prompt <name> "<follow-up>"
-drovr list | path <name> | providers | rm <name>
+drovr list               # each worker: status, turn, current action
+drovr status             # one line for a prompt or status bar: "2▶ 1✓ 1✗"
+drovr path <name> | providers | rm <name>
 ```
+
+For WezTerm, `weztermHelper = true` installs `~/.local/share/drovr/wezterm.lua`, which
+reads drovr's state without spawning a process (usage in the file's header).
 
 ## License
 

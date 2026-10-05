@@ -117,6 +117,12 @@ in
       description = "Private repo roots (and everything under them) where drovr may start workers; each also needs a DROVR.md.";
     };
 
+    weztermHelper = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Install integrations/wezterm.lua as ~/.local/share/drovr/wezterm.lua for a status-bar summary.";
+    };
+
     installSkill = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -135,5 +141,8 @@ in
     home.packages = wrappers ++ [ drovr ];
 
     home.file.".claude/skills/drovr/SKILL.md" = lib.mkIf cfg.installSkill { source = ./SKILL.md; };
+    home.file.".local/share/drovr/wezterm.lua" = lib.mkIf cfg.weztermHelper {
+      source = ./integrations/wezterm.lua;
+    };
   };
 }

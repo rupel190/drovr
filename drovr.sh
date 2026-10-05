@@ -19,7 +19,8 @@ usage: drovr run <name> [--edit | --scratch <dir>] [--via <provider>] <task> [--
        drovr wait <name> [seconds]     block until the turn ends (default: no limit)
        drovr read <name>               print the worker's final answer
        drovr path <name>               the worker's working directory
-       drovr list
+       drovr list                      workers with turn and current action
+       drovr status                    one-line summary for a prompt or status bar
        drovr providers
        drovr rm <name>                 drop the worker (and its worktree, if clean)
 EOF
@@ -74,12 +75,19 @@ launch() {
   shift 3
   rm -f "$w/exit"
   mkdir -p "$worker_config"
+  # Each turn appends to events.jsonl; progress reads from this offset on.
+  touch "$w/events.jsonl"
+  wc -l <"$w/events.jsonl" >"$w/offset"
   # shellcheck disable=SC2016 # expanded by the inner bash, on purpose
   DROVR_CONFIG="$worker_config" setsid -f bash -c '
     cd "$1" || exit 1
     w="$2"; via="$3"; shift 3
-    env -u WEZTERM_PANE CLAUDE_CONFIG_DIR="$DROVR_CONFIG" "claude-$via" -p "$@" --output-format json >"$w/out.json" 2>"$w/err.log"
-    echo $? >"$w/exit"
+    env -u WEZTERM_PANE CLAUDE_CONFIG_DIR="$DROVR_CONFIG" "claude-$via" -p "$@" \
+      --output-format stream-json --verbose >>"$w/events.jsonl" 2>"$w/err.log"
+    rc=$?
+    # The turn'"'"'s final result event, in the shape `read` and `prompt` expect.
+    jq -c "select(.type == \"result\")" "$w/events.jsonl" 2>/dev/null | tail -n1 >"$w/out.json"
+    echo $rc >"$w/exit"
   ' drovr-worker "$cwd" "$w" "$via" "$@" "${worker_flags[@]}"
 }
 
@@ -194,6 +202,21 @@ cmd_read() {
     "$w/out.json" >&2
 }
 
+# progress <worker>: "turn N  <last tool> <target>" for the turn in flight.
+progress() {
+  local w="$1" off cwd line
+  off="$(cat "$w/offset" 2>/dev/null || echo 0)"
+  cwd="$(cat "$w/cwd" 2>/dev/null)"
+  line="$(tail -n +"$((off + 1))" "$w/events.jsonl" 2>/dev/null | jq -rs '
+    [.[] | select(.type == "assistant")] as $a
+    | ([$a[].message.id] | unique | length) as $n
+    | ([$a[].message.content[]? | select(.type == "tool_use")] | last) as $t
+    | "turn \($n)" + (if $t then "  \($t.name) \(($t.input.file_path // $t.input.path // $t.input.pattern // "") | tostring)" else "" end)
+  ' 2>/dev/null)"
+  [[ "$line" != *" $cwd" ]] || line="${line%"$cwd"}."
+  echo "${line//"$cwd"\//}"
+}
+
 cmd_list() {
   local w name status
   [ -d "$state_root" ] || return 0
@@ -201,15 +224,31 @@ cmd_list() {
     [ -d "$w" ] || continue
     w="${w%/}"
     name="${w##*/}"
+    local detail
     if [ ! -e "$w/exit" ]; then
       status=running
-    elif [ "$(cat "$w/exit")" = 0 ]; then
-      status="done"
+      detail="$(progress "$w")"
     else
-      status="failed($(cat "$w/exit"))"
+      if [ "$(cat "$w/exit")" = 0 ]; then status="done"; else status="failed($(cat "$w/exit"))"; fi
+      detail="$(jq -r '"turn \(.num_turns // "?")" + (if (.permission_denials | length) > 0 then "  \(.permission_denials | length) denied" else "" end)' "$w/out.json" 2>/dev/null)"
     fi
-    printf '%-20s %-12s %-10s %s\n' "$name" "$status" "$(cat "$w/via" 2>/dev/null)" "$(cat "$w/cwd" 2>/dev/null)"
+    printf '%-16s %-10s %-9s %s\n' "$name" "$status" "$(cat "$w/via" 2>/dev/null)" "$detail"
   done
+}
+
+# status: one line for a prompt or status bar ("2▶ 1✓ 1✗"), empty when idle.
+cmd_status() {
+  local w run=0 ok=0 bad=0 out=()
+  for w in "$state_root"/*/; do
+    [ -f "$w/cwd" ] || continue
+    if [ ! -e "$w/exit" ]; then run=$((run + 1))
+    elif [ "$(cat "$w/exit")" = 0 ]; then ok=$((ok + 1))
+    else bad=$((bad + 1)); fi
+  done
+  [ "$run" = 0 ] || out+=("$run▶")
+  [ "$ok" = 0 ] || out+=("$ok✓")
+  [ "$bad" = 0 ] || out+=("$bad✗")
+  [ "${#out[@]}" = 0 ] || echo "${out[*]}"
 }
 
 cmd_rm() {
@@ -233,6 +272,7 @@ case "${1:-}" in
   wait) shift; cmd_wait "$@" ;;
   read) shift; cmd_read "$@" ;;
   list) cmd_list ;;
+  status) cmd_status ;;
   path) [ -n "${2:-}" ] || usage; cat "$(worker_dir "$2")/cwd" ;;
   providers) echo "$DROVR_PROVIDERS (default: $DROVR_DEFAULT)" ;;
   rm) shift; cmd_rm "$@" ;;
