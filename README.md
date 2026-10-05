@@ -23,7 +23,39 @@ A worker is `claude -p` pointed at another `ANTHROPIC_BASE_URL`. No daemon, no m
 Everything a worker reads goes to its provider. `DROVR.md` states what may leave a
 private repo; an optional `providers: a, b` line limits backends.
 
-## Install (home-manager)
+## Install
+
+drovr is one bash script plus a config file. It needs `bash`, `jq`, `git`, `setsid`
+(util-linux) and Claude Code.
+
+```bash
+install -Dm755 drovr.sh ~/.local/bin/drovr
+install -Dm644 SKILL.md ~/.claude/skills/drovr/SKILL.md   # optional
+```
+
+`~/.config/drovr/config.json` (or `$DROVR_CONFIG`):
+
+```json
+{
+  "claude": "claude",
+  "defaultProvider": "deepseek",
+  "allowedRepos": [],
+  "providers": {
+    "deepseek": {
+      "baseUrl": "https://api.deepseek.com/anthropic",
+      "model": "deepseek-v4-pro",
+      "keyFile": "/path/to/deepseek-key",
+      "price": { "input": 1.32, "cachedInput": 0.044, "output": 3.96 }
+    }
+  }
+}
+```
+
+The key is read from `keyFile` at launch, never stored in the config. `authVar` picks
+`ANTHROPIC_AUTH_TOKEN` (default) or `ANTHROPIC_API_KEY`; `price` (USD per 1M tokens) is
+optional and fills the cost column of `drovr list`.
+
+### home-manager
 
 ```nix
 inputs.drovr.url = "github:rupel190/drovr";
@@ -34,13 +66,13 @@ programs.drovr = {
   providers.deepseek = {
     baseUrl = "https://api.deepseek.com/anthropic";
     model = "deepseek-v4-pro";
-    keyFile = "/run/agenix/deepseek-api-key"; # read at launch, never in the store
+    keyFile = "/run/agenix/deepseek-api-key";
   };
 };
 ```
 
-Each provider becomes a `claude-<name>` wrapper. A skill is installed to
-`~/.claude/skills/drovr` (`installSkill = false` to skip).
+The module writes the config, installs the skill, and adds `claude-<name>` shortcuts for
+`drovr claude <name>`.
 
 ## Usage
 
@@ -49,13 +81,18 @@ drovr run <name> [--edit | --scratch <dir>] [--via <provider>] "<task>"
 drovr wait <name> [seconds]
 drovr read <name>        # answer, then any denied tool calls
 drovr prompt <name> "<follow-up>"
-drovr list               # each worker: status, turn, current action
+drovr list               # each worker: status, cost, turn, current action
 drovr status             # one line for a prompt or status bar: "2▶ 1✓ 1✗"
+drovr claude <provider>  # Claude Code against a provider, for a quick check
 drovr path <name> | providers | rm <name>
 ```
 
 For WezTerm, `weztermHelper = true` installs `~/.local/share/drovr/wezterm.lua`, which
 reads drovr's state without spawning a process (usage in the file's header).
+
+## Tests
+
+`tests/run.sh` runs drovr against a stub Claude Code; nothing reaches a provider.
 
 ## License
 

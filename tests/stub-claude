@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Stands in for Claude Code: logs what drovr hands it, prints a short event stream.
+{
+  printf 'argv:'; printf ' %q' "$@"; echo
+  echo "cwd=$PWD"
+  echo "base=${ANTHROPIC_BASE_URL:-} model=${ANTHROPIC_MODEL:-} token=${ANTHROPIC_AUTH_TOKEN:-} apikey=${ANTHROPIC_API_KEY:-}"
+  echo "config=${CLAUDE_CONFIG_DIR:-} pane=${WEZTERM_PANE:-unset} worker=${CLAUDE_WORKER:-} retries=${CLAUDE_CODE_MAX_RETRIES:-}"
+} >>"$STUB_LOG"
+prompt="" sid="sid-new"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p) prompt="$2"; shift 2 ;;
+    --resume) sid="$2-resumed"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+sleep "${STUB_SLEEP:-0}"
+echo '{"type":"system","subtype":"init"}'
+echo '{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","name":"Read","input":{"file_path":"'"$PWD"'/a.txt"}}]}}'
+denials='[]'
+[[ "$prompt" != *deny* ]] || denials='[{"tool_name":"Read","tool_input":{"file_path":"/etc/shadow"}}]'
+echo '{"type":"result","result":"answer to: '"$prompt"'","session_id":"'"$sid"'","num_turns":2,"permission_denials":'"$denials"',"usage":{"input_tokens":1000000,"cache_read_input_tokens":1000000,"output_tokens":1000000}}'

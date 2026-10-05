@@ -75,7 +75,7 @@ drovr wait <name> 900                      # block until the turn ends (seconds;
 drovr read <name>                          # the worker's final answer
 drovr prompt <name> "<follow-up>"          # next turn in the same session
 drovr path <name>                          # its working directory
-drovr list                                 # status, turn and current action of each worker
+drovr list                                 # status, cost, turn and current action of each worker
 drovr rm <name>                            # refuses while its worktree has uncommitted changes
 ```
 

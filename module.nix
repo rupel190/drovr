@@ -11,49 +11,49 @@
 let
   cfg = config.programs.drovr;
 
-  # One `claude-<name>` per provider: Claude Code pointed at that endpoint. The key is
-  # read from keyFile at launch, never baked into the store.
-  mkWrapper =
-    name: p:
-    pkgs.writeShellApplication {
-      name = "claude-${name}";
-      text = ''
-        key=${lib.escapeShellArg p.keyFile}
-        [ -r "$key" ] || {
-          echo "claude-${name}: $key not readable" >&2
-          exit 1
-        }
-        ${p.authVar}="$(<"$key")"
-        export ${p.authVar}
-        export ANTHROPIC_BASE_URL=${lib.escapeShellArg p.baseUrl}
-        export ANTHROPIC_MODEL=${lib.escapeShellArg p.model}
-        ${lib.optionalString (p.smallModel != null) ''
-          export ANTHROPIC_DEFAULT_HAIKU_MODEL=${lib.escapeShellArg p.smallModel}
-        ''}
-        export CLAUDE_WORKER=1
-        # The default (10 retries, growing waits) turns a bad key into minutes of silence.
-        export CLAUDE_CODE_MAX_RETRIES=3
-        exec ${lib.getExe cfg.claudePackage} "$@"
-      '';
-    };
-
-  wrappers = lib.mapAttrsToList mkWrapper cfg.providers;
-
   drovr = pkgs.writeShellApplication {
     name = "drovr";
-    runtimeInputs = wrappers ++ [
+    runtimeInputs = [
       pkgs.jq
       pkgs.git
       pkgs.coreutils
       pkgs.gnused
       pkgs.util-linux # setsid
     ];
-    text = ''
-      DROVR_ALLOWED=${lib.escapeShellArg (lib.concatLines cfg.allowedRepos)}
-      DROVR_PROVIDERS=${lib.escapeShellArg (lib.concatStringsSep " " (lib.attrNames cfg.providers))}
-      DROVR_DEFAULT=${lib.escapeShellArg cfg.defaultProvider}
-    ''
-    + builtins.readFile ./drovr.sh;
+    text = builtins.readFile ./drovr.sh;
+    # The script's own file-wide directive lands below this wrapper's header.
+    excludeShellChecks = [ "SC2016" ];
+  };
+
+  # `claude-<name>`: a shortcut for `drovr claude <name>`, which reads the key at launch.
+  aliases = lib.mapAttrsToList (
+    name: _:
+    pkgs.writeShellScriptBin "claude-${name}" ''exec ${lib.getExe drovr} claude ${lib.escapeShellArg name} "$@"''
+  ) cfg.providers;
+
+  # The config drovr reads; null options are left out.
+  settings = {
+    claude = lib.getExe cfg.claudePackage;
+    inherit (cfg) defaultProvider allowedRepos;
+    providers = lib.mapAttrs (_: p: lib.filterAttrsRecursive (_: v: v != null) p) cfg.providers;
+  };
+
+  price = lib.types.submodule {
+    options = {
+      input = lib.mkOption {
+        type = lib.types.number;
+        description = "USD per 1M uncached input tokens.";
+      };
+      cachedInput = lib.mkOption {
+        type = lib.types.nullOr lib.types.number;
+        default = null;
+        description = "USD per 1M cached input tokens; null charges them as input.";
+      };
+      output = lib.mkOption {
+        type = lib.types.number;
+        description = "USD per 1M output tokens.";
+      };
+    };
   };
 
   provider = lib.types.submodule {
@@ -78,8 +78,21 @@ let
         description = "File holding the API key, read at launch (e.g. an agenix or sops-nix secret path).";
         example = "/run/agenix/deepseek-api-key";
       };
+      price = lib.mkOption {
+        type = lib.types.nullOr price;
+        default = null;
+        description = "Token prices for the cost column of `drovr list`.";
+        example = {
+          input = 0.66;
+          cachedInput = 0.022;
+          output = 1.98;
+        };
+      };
       authVar = lib.mkOption {
-        type = lib.types.str;
+        type = lib.types.enum [
+          "ANTHROPIC_AUTH_TOKEN"
+          "ANTHROPIC_API_KEY"
+        ];
         default = "ANTHROPIC_AUTH_TOKEN";
         description = "Variable the key goes into (ANTHROPIC_AUTH_TOKEN sends a Bearer header, ANTHROPIC_API_KEY sends x-api-key).";
       };
@@ -138,7 +151,9 @@ in
       }
     ];
 
-    home.packages = wrappers ++ [ drovr ];
+    home.packages = aliases ++ [ drovr ];
+
+    xdg.configFile."drovr/config.json".text = builtins.toJSON settings;
 
     home.file.".claude/skills/drovr/SKILL.md" = lib.mkIf cfg.installSkill { source = ./SKILL.md; };
     home.file.".local/share/drovr/wezterm.lua" = lib.mkIf cfg.weztermHelper {
