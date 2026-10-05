@@ -7,10 +7,11 @@ die() { echo "drovr: $*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-usage: drovr run <name> [--edit] [--via <provider>] <task> [-- <claude args>...]
+usage: drovr run <name> [--edit | --scratch <dir>] [--via <provider>] <task> [-- <claude args>...]
        drovr prompt <name> <text>      follow-up turn in the same session
        drovr wait <name> [seconds]     block until the turn ends (default: no limit)
        drovr read <name>               print the worker's final answer
+       drovr path <name>               the worker's working directory
        drovr list
        drovr providers
        drovr rm <name>                 drop the worker (and its worktree, if clean)
@@ -33,6 +34,12 @@ allowed() {
   return 1
 }
 
+# DROVR.md at the repo root says what may leave the repo; an optional
+# "providers: a, b" line limits which backends may see it.
+repo_providers() {
+  sed -n 's/^providers:[[:space:]]*//p' "$1/DROVR.md" | head -n1 | tr ',' ' '
+}
+
 # launch <dir> <worker-state> <provider> <claude args...>: one headless turn, detached so it
 # outlives the calling shell (Claude's Bash tool reaps its children).
 launch() {
@@ -49,12 +56,13 @@ launch() {
 }
 
 cmd_run() {
-  local name="${1:-}" edit=0 via="$DROVR_DEFAULT" task
+  local name="${1:-}" edit=0 scratch="" via="$DROVR_DEFAULT" task
   [ -n "$name" ] || usage
   shift
   while :; do
     case "${1:-}" in
       --edit) edit=1; shift ;;
+      --scratch) scratch="${2:-}"; shift 2 || usage ;;
       --via) via="${2:-}"; shift 2 || usage ;;
       *) break ;;
     esac
@@ -65,14 +73,34 @@ cmd_run() {
   shift
   [ "${1:-}" != "--" ] || shift
 
-  local w repo cwd mode
+  local w repo cwd mode extra=()
   w="$(worker_dir "$name")"
   [ ! -e "$w" ] || die "worker '$name' exists; 'drovr rm $name' first"
-  repo="$(git rev-parse --show-toplevel 2>/dev/null)" || die "not inside a git repo"
-  allowed "$repo" || die "$repo is not in my.claude.drovr.allowedRepos"
+
+  if [ -n "$scratch" ]; then
+    # Scratch: the worker sees only the brief you prepared, never the repo.
+    [ "$edit" = 0 ] || die "--edit and --scratch are exclusive"
+    [ -d "$scratch" ] || die "scratch dir '$scratch' does not exist"
+    mkdir -p "$w/scratch"
+    cp -r "$scratch"/. "$w/scratch"/
+    cwd="$w/scratch"
+    repo=-
+    mode=acceptEdits
+    # Pre-approved Bash rules from your settings would reach outside the brief.
+    extra=(--disallowedTools Bash)
+  else
+    repo="$(git rev-parse --show-toplevel 2>/dev/null)" || die "not inside a git repo (or use --scratch)"
+    allowed "$repo" || die "$repo is not in my.claude.drovr.allowedRepos (or use --scratch)"
+    [ -f "$repo/DROVR.md" ] || die "$repo has no DROVR.md saying what may leave it (or use --scratch)"
+    local only
+    only="$(repo_providers "$repo")"
+    [ -z "$only" ] || [[ " $only " == *" $via "* ]] || die "$repo allows only: $only"
+  fi
 
   mkdir -p "$w"
-  if [ "$edit" = 1 ]; then
+  if [ -n "$scratch" ]; then
+    :
+  elif [ "$edit" = 1 ]; then
     # Own worktree: a worker never edits the checkout you (or another session) work in.
     cwd="$w/wt"
     git -C "$repo" worktree add -q -b "drovr/$name" "$cwd" || { rm -rf "$w"; die "worktree add failed"; }
@@ -85,7 +113,8 @@ cmd_run() {
   printf '%s\n' "$repo" >"$w/repo"
   printf '%s\n' "$mode" >"$w/mode"
   printf '%s\n' "$via" >"$w/via"
-  launch "$cwd" "$w" "$via" "$task" --permission-mode "$mode" "$@"
+  [ "${#extra[@]}" -eq 0 ] || printf '%s\n' "${extra[@]}" >"$w/extra"
+  launch "$cwd" "$w" "$via" "$task" --permission-mode "$mode" "${extra[@]}" "$@"
   echo "drovr: $name started on $via in $cwd ($mode)"
 }
 
@@ -97,7 +126,9 @@ cmd_prompt() {
   [ -e "$w/exit" ] || die "'$name' is still running; 'drovr wait $name' first"
   sid="$(jq -r '.session_id // empty' "$w/out.json" 2>/dev/null)"
   [ -n "$sid" ] || die "'$name' has no session to resume (see $w/err.log)"
-  launch "$(cat "$w/cwd")" "$w" "$(cat "$w/via")" "$text" --resume "$sid" --permission-mode "$(cat "$w/mode")"
+  local extra=()
+  [ ! -s "$w/extra" ] || mapfile -t extra <"$w/extra"
+  launch "$(cat "$w/cwd")" "$w" "$(cat "$w/via")" "$text" --resume "$sid" --permission-mode "$(cat "$w/mode")" "${extra[@]}"
   echo "drovr: $name resumed"
 }
 
@@ -168,6 +199,7 @@ case "${1:-}" in
   wait) shift; cmd_wait "$@" ;;
   read) shift; cmd_read "$@" ;;
   list) cmd_list ;;
+  path) [ -n "${2:-}" ] || usage; cat "$(worker_dir "$2")/cwd" ;;
   providers) echo "$DROVR_PROVIDERS (default: $DROVR_DEFAULT)" ;;
   rm) shift; cmd_rm "$@" ;;
   *) usage ;;

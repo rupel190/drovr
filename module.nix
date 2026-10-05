@@ -1,7 +1,7 @@
 # drovr — hand tasks from your Claude session to headless Claude Code workers on
 # cheaper Anthropic-compatible backends. Each editing worker gets its own git
-# worktree, only allowlisted repos are eligible, and the answer comes back as one
-# message. No daemon, no multiplexer.
+# worktree; a repo must be allowlisted and carry a DROVR.md, or the worker gets
+# only a prepared scratch folder. The answer comes back as one message.
 {
   pkgs,
   lib,
@@ -45,6 +45,7 @@ let
       pkgs.jq
       pkgs.git
       pkgs.coreutils
+      pkgs.gnused
       pkgs.util-linux # setsid
     ];
     text = ''
