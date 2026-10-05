@@ -2,6 +2,13 @@
 # DROVR_ALLOWED, DROVR_PROVIDERS and DROVR_DEFAULT are prepended by drovr.nix.
 
 state_root="${XDG_STATE_HOME:-$HOME/.local/state}/drovr"
+# One Claude config for every worker and provider: none of your settings, MCP servers,
+# CLAUDE.md or memory reach a worker, and its transcripts stay out of claude-sync.
+worker_config="${XDG_STATE_HOME:-$HOME/.local/state}/drovr-claude"
+
+# --restricted confines the file tools to the worker's directory and drops every
+# command-running tool; five tools also cut the prompt from ~17.5k to ~3.1k tokens.
+worker_flags=(--restricted --strict-mcp-config --tools "Read,Grep,Glob,Edit,Write")
 
 die() { echo "drovr: $*" >&2; exit 1; }
 
@@ -66,13 +73,14 @@ launch() {
   local cwd="$1" w="$2" via="$3"
   shift 3
   rm -f "$w/exit"
+  mkdir -p "$worker_config"
   # shellcheck disable=SC2016 # expanded by the inner bash, on purpose
-  setsid -f bash -c '
+  DROVR_CONFIG="$worker_config" setsid -f bash -c '
     cd "$1" || exit 1
     w="$2"; via="$3"; shift 3
-    env -u WEZTERM_PANE "claude-$via" -p "$@" --output-format json >"$w/out.json" 2>"$w/err.log"
+    env -u WEZTERM_PANE CLAUDE_CONFIG_DIR="$DROVR_CONFIG" "claude-$via" -p "$@" --output-format json >"$w/out.json" 2>"$w/err.log"
     echo $? >"$w/exit"
-  ' drovr-worker "$cwd" "$w" "$via" "$@"
+  ' drovr-worker "$cwd" "$w" "$via" "$@" "${worker_flags[@]}"
 }
 
 cmd_run() {
@@ -93,7 +101,7 @@ cmd_run() {
   shift
   [ "${1:-}" != "--" ] || shift
 
-  local w repo cwd mode extra=()
+  local w repo cwd mode
   w="$(worker_dir "$name")"
   [ ! -e "$w" ] || die "worker '$name' exists; 'drovr rm $name' first"
 
@@ -106,8 +114,6 @@ cmd_run() {
     cwd="$w/scratch"
     repo=-
     mode=acceptEdits
-    # Pre-approved Bash rules from your settings would reach outside the brief.
-    extra=(--disallowedTools Bash)
   else
     repo="$(git rev-parse --show-toplevel 2>/dev/null)" || die "not inside a git repo (or use --scratch)"
     if allowed "$repo"; then
@@ -125,34 +131,24 @@ cmd_run() {
   mkdir -p "$w"
   if [ -n "$scratch" ]; then
     :
-  elif [ "$public" = 1 ]; then
-    # Public repo: only what is pushed is public, so work from a fresh checkout of the
-    # remote's default branch, never from your tree (unpushed work, ignored files).
+  else
+    # Always a worktree of your local HEAD: local commits included; ignored and
+    # untracked files (.env, local data) and your uncommitted edits are not.
     cwd="$w/wt"
-    git -C "$repo" fetch -q origin HEAD || { rm -rf "$w"; die "fetch from origin failed"; }
     if [ "$edit" = 1 ]; then
-      git -C "$repo" worktree add -q -b "drovr-$name" "$cwd" FETCH_HEAD || { rm -rf "$w"; die "worktree add failed"; }
+      git -C "$repo" worktree add -q -b "drovr-$name" "$cwd" HEAD || { rm -rf "$w"; die "worktree add failed"; }
       mode=acceptEdits
     else
-      git -C "$repo" worktree add -q --detach "$cwd" FETCH_HEAD || { rm -rf "$w"; die "worktree add failed"; }
+      git -C "$repo" worktree add -q --detach "$cwd" HEAD || { rm -rf "$w"; die "worktree add failed"; }
       mode=default
     fi
-  elif [ "$edit" = 1 ]; then
-    # Own worktree: a worker never edits the checkout you (or another session) work in.
-    cwd="$w/wt"
-    git -C "$repo" worktree add -q -b "drovr-$name" "$cwd" || { rm -rf "$w"; die "worktree add failed"; }
-    mode=acceptEdits
-  else
-    cwd="$PWD"
-    mode=default
   fi
   printf '%s\n' "$cwd" >"$w/cwd"
   printf '%s\n' "$repo" >"$w/repo"
   printf '%s\n' "$mode" >"$w/mode"
   printf '%s\n' "$via" >"$w/via"
-  [ "${#extra[@]}" -eq 0 ] || printf '%s\n' "${extra[@]}" >"$w/extra"
-  launch "$cwd" "$w" "$via" "$task" --permission-mode "$mode" "${extra[@]}" "$@"
-  echo "drovr: $name started on $via in $cwd ($mode$([ "$public" = 0 ] || echo ", public: pushed content only"))"
+  launch "$cwd" "$w" "$via" "$task" --permission-mode "$mode" "$@"
+  echo "drovr: $name started on $via in $cwd ($mode$([ "$public" = 0 ] || echo ", public repo"))"
 }
 
 cmd_prompt() {
@@ -163,9 +159,7 @@ cmd_prompt() {
   [ -e "$w/exit" ] || die "'$name' is still running; 'drovr wait $name' first"
   sid="$(jq -r '.session_id // empty' "$w/out.json" 2>/dev/null)"
   [ -n "$sid" ] || die "'$name' has no session to resume (see $w/err.log)"
-  local extra=()
-  [ ! -s "$w/extra" ] || mapfile -t extra <"$w/extra"
-  launch "$(cat "$w/cwd")" "$w" "$(cat "$w/via")" "$text" --resume "$sid" --permission-mode "$(cat "$w/mode")" "${extra[@]}"
+  launch "$(cat "$w/cwd")" "$w" "$(cat "$w/via")" "$text" --resume "$sid" --permission-mode "$(cat "$w/mode")"
   echo "drovr: $name resumed"
 }
 
@@ -195,6 +189,9 @@ cmd_read() {
     cat "$w/err.log" >&2
     exit 1
   fi
+  # Talking back: what the worker wanted and was refused, for you to decide on.
+  jq -r '.permission_denials[]? | "drovr: denied \(.tool_name) \(.tool_input.file_path // .tool_input.path // .tool_input.pattern // "")"' \
+    "$w/out.json" >&2
 }
 
 cmd_list() {

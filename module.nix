@@ -1,8 +1,7 @@
 # drovr — hand tasks from your Claude session to headless Claude Code workers on
-# cheaper Anthropic-compatible backends. Each editing worker gets its own git
-# worktree. Public repos qualify as pushed content only; private ones must be
-# allowlisted with a DROVR.md; otherwise a worker gets only a prepared scratch
-# folder. The answer comes back as one message.
+# cheaper Anthropic-compatible backends. Workers run --restricted with five file tools
+# and an empty config, in a worktree of HEAD (public or allowlisted repos) or a
+# prepared scratch folder. The answer comes back as one message.
 {
   pkgs,
   lib,

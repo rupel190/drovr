@@ -1,13 +1,19 @@
 ---
 name: drovr
-description: Hand mechanical, well-specified tasks from this session to headless Claude Code workers on cheaper Anthropic-compatible backends (DeepSeek by default) via the `drovr` CLI. Use when a task is bulk and checkable (broad searches, codemods, test scaffolding, first-pass reviews, doc sweeps) and the repo is public, or allowlisted with a DROVR.md, or the task can be briefed in a scratch folder. Do not use for judgment-heavy debugging, or for anything the ground rules below exclude.
+description: Hand tasks from this session to headless Claude Code workers on cheaper Anthropic-compatible backends (DeepSeek by default) via the `drovr` CLI. Use ONLY when the user asks to delegate or to use drovr; never on your own initiative. Workers can read, search and edit files but cannot run commands or tests.
 ---
 
 # drovr
 
 A worker is the same `claude` CLI pointed at another provider's Anthropic-compatible
-endpoint (`claude-<provider>`), run headless. It shares your settings, hooks and
-permission rules, but not your context: write the task so it stands alone.
+endpoint (`claude-<provider>`), run headless with its own empty Claude config (none of
+your settings, MCP servers, CLAUDE.md or memory) and `--restricted`:
+
+- **Tools: Read, Grep, Glob, Edit, Write. No Bash**, so no builds, tests, git or web.
+  If a task needs a command run, run it yourself before or after the worker.
+- **File tools are confined to the worker's directory**; reads outside it are refused.
+
+It shares none of your context: write the task so it stands alone.
 
 **Everything a worker reads goes to its provider.** Phrasing a task abstractly does
 not limit what it reads; where it runs does. Pick the mode by what may leave.
@@ -16,8 +22,8 @@ not limit what it reads; where it runs does. Pick the mode by what may leave.
 
 | Mode | Worker sees | Allowed when |
 |---|---|---|
-| public repo (`drovr run`, `--edit`) | a fresh checkout of the remote's default branch: pushed content only, never your tree | origin answers an anonymous `git ls-remote` (drovr checks); no allowlist or DROVR.md needed |
-| allowlisted repo (`drovr run`, `--edit`) | the whole working tree (read-only), or its own worktree with `--edit` | repo is in `my.claude.drovr.allowedRepos` **and** has a `DROVR.md` that permits this kind of task |
+| public repo (`drovr run`, `--edit`) | a worktree of your local HEAD: committed files incl. unpushed commits; not your uncommitted edits, untracked or ignored files | origin answers an anonymous `git ls-remote` (drovr checks); no allowlist or DROVR.md needed |
+| allowlisted repo (`drovr run`, `--edit`) | the same kind of worktree | repo is in `my.claude.drovr.allowedRepos` **and** has a `DROVR.md` that permits this kind of task |
 | scratch (`--scratch <dir>`) | only the folder you prepared, copied into its own state; Bash disabled | anywhere, as long as the brief itself obeys the ground rules |
 
 For scratch: write a self-contained brief into a folder in your scratchpad (task
@@ -82,3 +88,5 @@ Names: `[a-z][a-z0-9-]*`, unique among live workers. Repo mode runs from inside 
 - A refusal from drovr (allowlist, missing DROVR.md, provider not allowed) is the user's policy, not a bug to route around.
 - Several independent workers may run at once; keep each task to one concern.
 - A failed run prints its stderr on `drovr read`. Report it; do not retry blindly.
+- `drovr read` also lists what the worker was **denied** (`drovr: denied <tool> <path>`). Decide whether that matters, ask the user if it touches policy, and continue with `drovr prompt` if useful.
+- Commit first if the worker must see your latest changes: it works from HEAD, not your working tree.
