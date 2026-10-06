@@ -15,6 +15,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 sleep "${STUB_SLEEP:-0}"
+# Edits the way a worker would: new file, or a change to a.txt.
+[[ "$prompt" != *write* ]] || echo "from the worker" >worker.txt
+[[ "$prompt" != *conflict* ]] || echo "worker version" >a.txt
 echo '{"type":"system","subtype":"init"}'
 echo '{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","name":"Read","input":{"file_path":"'"$PWD"'/a.txt"}}]}}'
 denials='[]'

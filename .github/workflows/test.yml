@@ -13,7 +13,4 @@ jobs:
       - name: shellcheck
         run: shellcheck -x drovr.sh tests/run.sh tests/stub-claude
       - name: tests
-        run: |
-          git config --global user.name ci
-          git config --global user.email ci@example.com
-          tests/run.sh
+        run: tests/run.sh

@@ -74,6 +74,8 @@ drovr run <name> --via <p> "<task>"        # pick a provider; `drovr providers` 
 drovr wait <name> 900                      # block until the turn ends (seconds; omit = no limit)
 drovr read <name>                          # the worker's final answer
 drovr prompt <name> "<follow-up>"          # next turn in the same session
+drovr diff <name>                          # what a repo worker changed
+drovr merge <name>                         # --edit worker: commit, merge into its start branch, clean up
 drovr path <name>                          # its working directory
 drovr list                                 # status, cost, turn and current action of each worker
 drovr rm <name>                            # refuses while its worktree has uncommitted changes
@@ -84,7 +86,8 @@ Names: `[a-z][a-z0-9-]*`, unique among live workers. Repo mode runs from inside 
 ## Working with results
 
 - **Finish every task text with:** "End with a summary of at most 10 lines: what you did, files touched, anything unverified." `drovr read` returns only the final message, and you pay to read it.
-- **Verify before trusting.** Read the worker's diff (`git -C <repo> diff main...drovr-<name>`), or the files in `drovr path <name>`, or spot-check its claims. Never relay its summary as fact.
+- **Verify before trusting.** Read `drovr diff <name>` (or the files in `drovr path <name>` for scratch workers) and spot-check its claims; never relay its summary as fact. Run the tests yourself, since workers can't.
+- **Merge only after that review**, with `drovr merge <name>`. It refuses if the repo switched branches and aborts cleanly on a conflict, keeping the worker.
 - A refusal from drovr (allowlist, missing DROVR.md, provider not allowed) is the user's policy, not a bug to route around.
 - Several independent workers may run at once; keep each task to one concern.
 - A failed run prints its stderr on `drovr read`. Report it; do not retry blindly.

@@ -15,6 +15,7 @@ echo "sk-test-key" >"$tmp/key"
 
 git_repo() { # git_repo <dir>: a repo with one commit
   mkdir -p "$1" && git -C "$1" init -q && echo a >"$1/a.txt" &&
+    git -C "$1" config user.name t && git -C "$1" config user.email t@t &&
     git -C "$1" add -A && git -C "$1" -c user.name=t -c user.email=t@t commit -qm init
 }
 git_repo "$tmp/priv"
@@ -103,6 +104,37 @@ echo dirty >"$(d path ed)/new.txt"
 expect "rm refuses a dirty worktree" "worktree has changes" d rm ed
 rm "$(d path ed)/new.txt"
 expect "rm removes a clean one" "removed ed" d rm ed
+
+# diff and merge
+base="$(git -C "$tmp/priv" symbolic-ref --short HEAD)"
+in_dir "$tmp/priv" d run mw --edit --via alt "write a file. Then say what you did." >/dev/null
+d wait mw 20 >/dev/null
+expect "diff shows the worker's new file" "worker.txt" d diff mw
+git -C "$tmp/priv" checkout -q -b elsewhere
+expect "merge refuses when the repo moved to another branch" "switch back first" d merge mw
+git -C "$tmp/priv" checkout -q "$base"
+expect "merge succeeds" "merged mw into $base" d merge mw
+[ -f "$tmp/priv/worker.txt" ] && git -C "$tmp/priv" log --oneline -1 "$base" -- worker.txt | grep -qx "[0-9a-f]* drovr mw: write a file" &&
+  ok "worker's file is committed and merged" || no "merged content"
+! git -C "$tmp/priv" rev-parse -q --verify drovr-mw >/dev/null && [ ! -e "$XDG_STATE_HOME/drovr/mw" ] &&
+  ok "branch and worker are gone after merge" || no "merge cleanup"
+
+in_dir "$tmp/priv" d run cw --edit --via alt "conflict on a" >/dev/null
+d wait cw 20 >/dev/null
+echo "repo version" >"$tmp/priv/a.txt" && git -C "$tmp/priv" -c user.name=t -c user.email=t@t commit -qam "repo edit"
+head_before="$(git -C "$tmp/priv" rev-parse HEAD)"
+expect "conflicting merge is aborted" "nothing changed, worker kept" d merge cw
+[ "$(git -C "$tmp/priv" rev-parse HEAD)" = "$head_before" ] && ! git -C "$tmp/priv" rev-parse -q --verify MERGE_HEAD >/dev/null &&
+  [ "$(cat "$tmp/priv/a.txt")" = "repo version" ] && [ -d "$XDG_STATE_HOME/drovr/cw" ] &&
+  ok "repo untouched and worker kept after a conflict" || no "conflict state"
+
+in_dir "$tmp/priv" d run nc --edit --via alt "look only" >/dev/null
+d wait nc 20 >/dev/null
+expect "merge with no changes is refused" "changed nothing" d merge nc
+expect "read-only worker cannot be merged" "only --edit workers" d merge rr
+expect "scratch worker has no diff" "has no worktree" d diff sc
+
+grep -q "token=sk-test-key apikey=$" "$STUB_LOG" && ok "ANTHROPIC_API_KEY blanked next to the token" || no "api key blanking"
 
 # running worker: progress and status
 STUB_SLEEP=3 d run slow --scratch "$tmp/brief" "slow" >/dev/null

@@ -23,6 +23,22 @@ A worker is `claude -p` pointed at another `ANTHROPIC_BASE_URL`. No daemon, no m
 Everything a worker reads goes to its provider. `DROVR.md` states what may leave a
 private repo; an optional `providers: a, b` line limits backends.
 
+## Providers
+
+Any backend with an Anthropic-compatible Messages endpoint works. Endpoints below are from
+each provider's own docs (October 2026); model ids change often, so check there. Only
+DeepSeek is tested with drovr so far.
+
+| Provider | `baseUrl` | Example `model` |
+|---|---|---|
+| [DeepSeek](https://api-docs.deepseek.com/guides/anthropic_api) | `https://api.deepseek.com/anthropic` | `deepseek-v4-pro`, `deepseek-flash` |
+| [Moonshot (Kimi)](https://platform.kimi.ai/docs/api/overview) | `https://api.moonshot.ai/anthropic` | see docs |
+| [Z.ai (GLM)](https://docs.z.ai/devpack/tool/claude) | `https://api.z.ai/api/anthropic` | `GLM-5.3-Flash` |
+| [MiniMax](https://platform.minimax.io/docs/token-plan/claude-code) | `https://api.minimax.io/anthropic` | `MiniMax-M3` |
+| [Alibaba Model Studio (Qwen)](https://www.alibabacloud.com/help/en/model-studio/claude-code) | `https://dashscope.aliyuncs.com/apps/anthropic` | depends on plan |
+| [OpenRouter](https://openrouter.ai/docs/cookbook/coding-agents/claude-code-integration) | `https://openrouter.ai/api` | any OpenRouter model slug |
+| [Ollama](https://docs.ollama.com/api/anthropic-compatibility) (local) | `http://localhost:11434` | any pulled model; key file may hold `ollama` |
+
 ## Install
 
 drovr is one bash script plus a config file. It needs `bash`, `jq`, `git`, `setsid`
@@ -83,6 +99,8 @@ drovr read <name>        # answer, then any denied tool calls
 drovr prompt <name> "<follow-up>"
 drovr list               # each worker: status, cost, turn, current action
 drovr status             # one line for a prompt or status bar: "2▶ 1✓ 1✗"
+drovr diff <name>        # what a repo worker changed
+drovr merge <name>       # --edit worker: commit, merge into the branch it started from, clean up
 drovr claude <provider>  # Claude Code against a provider, for a quick check
 drovr path <name> | providers | rm <name>
 ```

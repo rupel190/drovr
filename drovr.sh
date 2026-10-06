@@ -24,6 +24,8 @@ usage: drovr run <name> [--edit | --scratch <dir>] [--via <provider>] <task> [--
        drovr prompt <name> <text>      follow-up turn in the same session
        drovr wait <name> [seconds]     block until the turn ends (default: no limit)
        drovr read <name>               print the worker's final answer
+       drovr diff <name>               what the worker changed (repo workers)
+       drovr merge <name>              commit an --edit worker's changes, merge them, clean up
        drovr path <name>               the worker's working directory
        drovr list                      workers with cost, turn and current action
        drovr status                    one-line summary for a prompt or status bar
@@ -106,6 +108,8 @@ cmd_claude() {
   [ -r "$keyfile" ] || die "provider '$p': key file $keyfile not readable"
 
   export "$authvar"="$(<"$keyfile")"
+  # Blank the other one, so Claude Code cannot fall back to Anthropic's own auth.
+  if [ "$authvar" = ANTHROPIC_AUTH_TOKEN ]; then export ANTHROPIC_API_KEY=""; else export ANTHROPIC_AUTH_TOKEN=""; fi
   export ANTHROPIC_BASE_URL="$base" ANTHROPIC_MODEL="$model"
   [ -z "$small" ] || export ANTHROPIC_DEFAULT_HAIKU_MODEL="$small"
   export CLAUDE_WORKER=1
@@ -197,6 +201,9 @@ cmd_run() {
   printf '%s\n' "$repo" >"$w/repo"
   printf '%s\n' "$mode" >"$w/mode"
   printf '%s\n' "$via" >"$w/via"
+  printf '%s\n' "$task" >"$w/task"
+  # The branch merge will go back into; empty when detached or in scratch mode.
+  [ "$repo" = - ] || git -C "$repo" symbolic-ref --short -q HEAD >"$w/base" || : >"$w/base"
   launch "$cwd" "$w" "$via" "$task" --permission-mode "$mode" "$@"
   echo "drovr: $name started on $via in $cwd ($mode$([ "$public" = 0 ] || echo ", public repo"))"
 }
@@ -307,6 +314,56 @@ cmd_status() {
   [ "${#out[@]}" = 0 ] || echo "${out[*]}"
 }
 
+# worker_repo <name>: state dir of a finished worker that has a worktree.
+worker_repo() {
+  local w
+  w="$(worker_dir "$1")"
+  [ -d "$w" ] || die "no worker '$1'"
+  [ -e "$w/exit" ] || die "'$1' is still running"
+  [ -d "$w/wt" ] || die "'$1' has no worktree (scratch worker: see 'drovr path $1')"
+  echo "$w"
+}
+
+cmd_diff() {
+  local name="${1:-}" w
+  [ -n "$name" ] || usage
+  w="$(worker_repo "$name")"
+  # Staging inside the worker's own worktree is harmless and shows new files too.
+  git -C "$w/wt" add -A
+  git -C "$w/wt" --no-pager diff --cached --stat
+  git -C "$w/wt" --no-pager diff --cached
+}
+
+cmd_merge() {
+  local name="${1:-}" w repo base current subject
+  [ -n "$name" ] || usage
+  w="$(worker_repo "$name")"
+  [ "$(cat "$w/mode")" = acceptEdits ] || die "'$name' is read-only; only --edit workers can be merged"
+  repo="$(cat "$w/repo")"
+  base="$(cat "$w/base" 2>/dev/null)" || base=""
+  [ -n "$base" ] || die "'$name' started on a detached HEAD; merge branch drovr-$name by hand"
+  current="$(git -C "$repo" symbolic-ref --short -q HEAD)" || current=""
+  [ "$current" = "$base" ] || die "$repo is on '${current:-detached}', '$name' started from '$base'; switch back first"
+
+  git -C "$w/wt" add -A
+  if ! git -C "$w/wt" diff --cached --quiet; then
+    # The task's first sentence, trimmed at a word boundary.
+    subject="$(head -n1 "$w/task" 2>/dev/null | sed 's/\.[[:space:]].*$//; s/\.$//')" || subject=""
+    [ "${#subject}" -le 60 ] || subject="${subject:0:60}" subject="${subject% *}…"
+    git -C "$w/wt" commit -q -m "drovr $name: ${subject:-changes}" || die "commit in the worker's worktree failed"
+  fi
+  [ -n "$(git -C "$repo" rev-list "$base..drovr-$name")" ] || die "'$name' changed nothing; 'drovr rm $name' to drop it"
+
+  if ! git -C "$repo" merge -q --no-edit "drovr-$name"; then
+    git -C "$repo" merge --abort 2>/dev/null || true
+    die "merging drovr-$name into $base failed (conflict, or your uncommitted edits touch the same files); nothing changed, worker kept"
+  fi
+  git -C "$repo" worktree remove "$w/wt"
+  git -C "$repo" branch -q -d "drovr-$name"
+  rm -rf "$w"
+  echo "drovr: merged $name into $base"
+}
+
 cmd_rm() {
   local name="${1:-}" w
   [ -n "$name" ] || usage
@@ -333,6 +390,8 @@ main() {
     path) [ -n "${2:-}" ] || usage; cat "$(worker_dir "$2")/cwd" ;;
     providers) echo "$(providers | xargs) (default: $(default_provider))" ;;
     claude) shift; cmd_claude "$@" ;;
+    diff) shift; cmd_diff "$@" ;;
+    merge) shift; cmd_merge "$@" ;;
     rm) shift; cmd_rm "$@" ;;
     *) usage ;;
   esac
