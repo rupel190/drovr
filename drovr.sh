@@ -25,7 +25,8 @@ usage: drovr run <name> [--edit | --scratch <dir>] [--via <provider>] <task> [--
        drovr wait <name> [seconds]     block until the turn ends (default: no limit)
        drovr read <name>               print the worker's final answer
        drovr diff <name>               what the worker changed (repo workers)
-       drovr merge <name>              commit an --edit worker's changes, merge them, clean up
+       drovr merge <name> [-m <msg>]   commit an --edit worker's changes (as one commit with
+                                       <msg>), merge them, clean up
        drovr path <name>               the worker's working directory
        drovr list                      workers with cost, turn and current action
        drovr status                    one-line summary for a prompt or status bar
@@ -335,7 +336,13 @@ cmd_diff() {
 }
 
 cmd_merge() {
-  local name="${1:-}" w repo base current subject
+  local name="" message="" w repo base current subject start
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -m | --message) message="${2:-}"; shift 2 || usage ;;
+      *) [ -z "$name" ] || usage; name="$1"; shift ;;
+    esac
+  done
   [ -n "$name" ] || usage
   w="$(worker_repo "$name")"
   [ "$(cat "$w/mode")" = acceptEdits ] || die "'$name' is read-only; only --edit workers can be merged"
@@ -346,7 +353,14 @@ cmd_merge() {
   [ "$current" = "$base" ] || die "$repo is on '${current:-detached}', '$name' started from '$base'; switch back first"
 
   git -C "$w/wt" add -A
-  if ! git -C "$w/wt" diff --cached --quiet; then
+  if [ -n "$message" ]; then
+    # One commit with your message: everything since the worker started, including
+    # commits made in its worktree during review.
+    start="$(git -C "$w/wt" merge-base "$base" HEAD)"
+    git -C "$w/wt" reset -q --soft "$start"
+    git -C "$w/wt" diff --cached --quiet ||
+      git -C "$w/wt" commit -q -m "$message" || die "commit in the worker's worktree failed"
+  elif ! git -C "$w/wt" diff --cached --quiet; then
     # The task's first sentence, trimmed at a word boundary.
     subject="$(head -n1 "$w/task" 2>/dev/null | sed 's/\.[[:space:]].*$//; s/\.$//')" || subject=""
     [ "${#subject}" -le 60 ] || subject="${subject:0:60}" subject="${subject% *}…"

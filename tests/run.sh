@@ -119,6 +119,16 @@ expect "merge succeeds" "merged mw into $base" d merge mw
 ! git -C "$tmp/priv" rev-parse -q --verify drovr-mw >/dev/null && [ ! -e "$XDG_STATE_HOME/drovr/mw" ] &&
   ok "branch and worker are gone after merge" || no "merge cleanup"
 
+in_dir "$tmp/priv" d run mm --edit --via alt "write another" >/dev/null
+d wait mm 20 >/dev/null
+echo "review fix" >>"$(d path mm)/worker.txt"
+git -C "$(d path mm)" add -A && git -C "$(d path mm)" commit -qm "review fix"
+expect "merge -m succeeds" "merged mm into $base" d merge mm -m $'feat: a proper subject\n\nWith a body.'
+[ "$(git -C "$tmp/priv" log -1 --format=%s "$base")" = "feat: a proper subject" ] &&
+  [ "$(git -C "$tmp/priv" log -1 --format=%b "$base")" = "With a body." ] &&
+  ! git -C "$tmp/priv" log --format=%s "$base" | grep -q "review fix" &&
+  ok "merge -m squashes worker and review commits into one with the message" || no "merge -m result" "$(git -C "$tmp/priv" log --oneline -3 "$base")"
+
 in_dir "$tmp/priv" d run cw --edit --via alt "conflict on a" >/dev/null
 d wait cw 20 >/dev/null
 echo "repo version" >"$tmp/priv/a.txt" && git -C "$tmp/priv" -c user.name=t -c user.email=t@t commit -qam "repo edit"

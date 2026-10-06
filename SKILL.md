@@ -75,7 +75,7 @@ drovr wait <name> 900                      # block until the turn ends (seconds;
 drovr read <name>                          # the worker's final answer
 drovr prompt <name> "<follow-up>"          # next turn in the same session
 drovr diff <name>                          # what a repo worker changed
-drovr merge <name>                         # --edit worker: commit, merge into its start branch, clean up
+drovr merge <name> -m "<message>"          # --edit worker: one commit with your message, merged into its start branch
 drovr path <name>                          # its working directory
 drovr list                                 # status, cost, turn and current action of each worker
 drovr rm <name>                            # refuses while its worktree has uncommitted changes
@@ -87,7 +87,7 @@ Names: `[a-z][a-z0-9-]*`, unique among live workers. Repo mode runs from inside 
 
 - **Finish every task text with:** "End with a summary of at most 10 lines: what you did, files touched, anything unverified." `drovr read` returns only the final message, and you pay to read it.
 - **Verify before trusting.** Read `drovr diff <name>` (or the files in `drovr path <name>` for scratch workers) and spot-check its claims; never relay its summary as fact. Run the tests yourself, since workers can't.
-- **Merge only after that review**, with `drovr merge <name>`. It refuses if the repo switched branches and aborts cleanly on a conflict, keeping the worker.
+- **Merge only after that review**, with `drovr merge <name> -m "<message>"`. Write the message yourself, in the style of the repo's recent `git log`, describing what is actually merged, including anything you fixed during review (commit or edit in `drovr path <name>` first; `-m` folds it all into one commit). Without `-m` drovr generates a plain subject from the task. It refuses if the repo switched branches and aborts cleanly on a conflict, keeping the worker.
 - A refusal from drovr (allowlist, missing DROVR.md, provider not allowed) is the user's policy, not a bug to route around.
 - Several independent workers may run at once; keep each task to one concern.
 - A failed run prints its stderr on `drovr read`. Report it; do not retry blindly.

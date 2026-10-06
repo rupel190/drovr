@@ -100,7 +100,7 @@ drovr prompt <name> "<follow-up>"
 drovr list               # each worker: status, cost, turn, current action
 drovr status             # one line for a prompt or status bar: "2▶ 1✓ 1✗"
 drovr diff <name>        # what a repo worker changed
-drovr merge <name>       # --edit worker: commit, merge into the branch it started from, clean up
+drovr merge <name> [-m <msg>]  # --edit worker: commit (as one commit with <msg>), merge into its start branch, clean up
 drovr claude <provider>  # Claude Code against a provider, for a quick check
 drovr path <name> | providers | rm <name>
 ```
