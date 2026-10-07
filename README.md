@@ -8,6 +8,10 @@ A worker is `claude -p` pointed at another `ANTHROPIC_BASE_URL`. No daemon, no m
 
 ## Workers
 
+drovr workers always run restricted. For privacy, they only see the folder they're given.
+For security, they get no shell and none of your settings or credentials. Against leaks,
+every read is confined by the tool itself, not left to the model's judgement.
+
 - Run `--restricted` with only Read, Grep, Glob, Edit and Write: **no Bash**, so no
   builds, tests or git.
 - Can't read outside their own directory (enforced by the tool, not the model).
