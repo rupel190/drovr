@@ -20,10 +20,12 @@ die() { echo "drovr: $*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-usage: drovr run <name> [--edit | --scratch <dir>] [--via <provider>] <task> [-- <claude args>...]
+usage: drovr run <name> [--edit | --scratch <dir>] [--via <provider>] [--budget <usd>]
+                 [--schema <file>] <task> [-- <claude args>...]
        drovr prompt <name> <text>      follow-up turn in the same session
        drovr wait <name> [seconds]     block until the turn ends (default: no limit)
-       drovr read <name>               print the worker's final answer
+       drovr read <name> [--json]      print the worker's final answer (--json: only its
+                                       schema-checked JSON)
        drovr diff <name>               what the worker changed (repo workers)
        drovr merge <name> [-m <msg>]   commit an --edit worker's changes (as one commit with
                                        <msg>), merge them, clean up
@@ -124,26 +126,207 @@ cmd_claude() {
 launch() {
   local cwd="$1" w="$2" via="$3"
   shift 3
-  rm -f "$w/exit"
+  rm -f "$w/exit" "$w/stopped" "$w/invalid" "$w/result.json" "$w/err.log"
   mkdir -p "$worker_config"
   # Each turn appends to events.jsonl; progress reads from this offset on.
   touch "$w/events.jsonl"
   wc -l <"$w/events.jsonl" >"$w/offset"
-  # shellcheck disable=SC2016 # expanded by the inner bash, on purpose
-  DROVR_WORKER_CONFIG="$worker_config" setsid -f bash -c '
-    cd "$1" || exit 1
-    self="$2"; w="$3"; via="$4"; shift 4
-    env -u WEZTERM_PANE CLAUDE_CONFIG_DIR="$DROVR_WORKER_CONFIG" "$self" claude "$via" -p "$@" \
-      --output-format stream-json --verbose >>"$w/events.jsonl" 2>"$w/err.log"
-    rc=$?
-    # The turn'"'"'s final result event, in the shape `read` and `prompt` expect.
-    jq -c "select(.type == \"result\")" "$w/events.jsonl" 2>/dev/null | tail -n1 >"$w/out.json"
-    echo $rc >"$w/exit"
-  ' drovr-worker "$cwd" "$self" "$w" "$via" "$@" "${worker_flags[@]}"
+  setsid -f "$self" _turn "$w" "$cwd" "$via" "$@" </dev/null >/dev/null 2>>"$w/err.log"
+}
+
+price_of() { cfg --arg p "$1" '.providers[$p].price // empty | tojson' 2>/dev/null || true; }
+
+# call_cost <worker> <line>: USD of the claude call whose events start after <line>. Exact
+# once its result event exists. Before that, input is exact (each assistant message carries
+# it) but output is only streamed as thinking-token counts and content, so it is estimated.
+call_cost() {
+  local w="$1" off="$2" price
+  price="$(price_of "$(cat "$w/via" 2>/dev/null)")"
+  [ -n "$price" ] || return 0
+  tail -n +"$((off + 1))" "$w/events.jsonl" 2>/dev/null | jq -rs --argjson p "$price" '
+    def usd(u; out): ((u.input_tokens // 0) + (u.cache_creation_input_tokens // 0)) * ($p.input // 0)
+      + (u.cache_read_input_tokens // 0) * ($p.cachedInput // $p.input // 0) + out * ($p.output // 0);
+    ([.[] | select(.type == "result")] | last) as $r
+    | if $r then usd($r.usage // {}; $r.usage.output_tokens // 0) / 1e6
+      else
+        ([.[] | select(.type == "assistant")] | group_by(.message.id) | map(.[0].message.usage // {})) as $in
+        | ([.[] | select(.subtype == "thinking_tokens") | .estimated_tokens_delta // 0] | add // 0) as $think
+        | ([.[] | select(.type == "assistant") | .message.content[]?
+            | (.text // "") + (if .type == "tool_use" then (.input | tojson) else "" end) | length] | add // 0) as $chars
+        | (($in | map(usd(.; 0)) | add // 0) + usd({}; $think + $chars / 4)) / 1e6
+      end'
+}
+
+# add_spend <worker> <usd>: the worker's running total, and the day's ledger across workers.
+add_spend() {
+  local w="$1" usd="$2"
+  [ -n "$usd" ] || return 0
+  jq -n --argjson a "$(cat "$w/spent" 2>/dev/null || echo 0)" --argjson b "$usd" '$a + $b' >"$w/spent.tmp" &&
+    mv "$w/spent.tmp" "$w/spent"
+  jq -nc --arg day "$(date +%F)" --arg worker "${w##*/}" --argjson usd "$usd" \
+    '{day: $day, worker: $worker, usd: $usd}' >>"$state_root/spend.jsonl"
+}
+
+# budget_left <worker>: USD this worker may still spend, or nothing when uncapped. Its own
+# --budget minus what it spent, capped by dailyBudget minus what every worker spent today.
+# Both only shrink, so a follow-up or a nudge never gets fresh money.
+budget_left() {
+  local w="$1" own daily today
+  own="$(cat "$w/budget" 2>/dev/null)" || own=""
+  daily="$(cfg '.dailyBudget // empty')"
+  [ -n "$own$daily" ] || return 0
+  today="$(jq -s --arg day "$(date +%F)" 'map(select(.day == $day) | .usd) | add // 0' \
+    "$state_root/spend.jsonl" 2>/dev/null)" || today=0
+  jq -nr --arg own "$own" --arg daily "$daily" --argjson spent "$(cat "$w/spent" 2>/dev/null || echo 0)" \
+    --argjson today "${today:-0}" '
+    [(if $own != "" then ($own | tonumber) - $spent else empty end),
+     (if $daily != "" then ($daily | tonumber) - $today else empty end)] | min'
+}
+
+# Checks the JSON an answer ends with (last ```json fence, else the whole answer) against a
+# JSON Schema subset: type, enum, required, properties, additionalProperties: false, items,
+# minItems, minLength. Prints {value, errors}.
+# shellcheck disable=SC2034 # used through cmd_turn
+read -r -d '' schema_jq <<'JQ' || true
+def check($s; $p):
+  . as $v | ($v | type) as $t
+  | if ($s | type) != "object" then empty else
+    (if $s.type == null then empty
+     else ([$s.type] | flatten) as $ts
+       | if any($ts[]; . == $t or (. == "integer" and $t == "number" and ($v | floor) == $v)) then empty
+         else "\($p): expected \($ts | join(" or ")), got \($t)" end end),
+    (if $s.enum == null or any($s.enum[]; . == $v) then empty
+     else "\($p): must be one of \($s.enum | tojson)" end),
+    (if $t == "string" and $s.minLength != null and ($v | length) < $s.minLength
+     then "\($p): shorter than \($s.minLength)" else empty end),
+    (if $t == "object" then
+       (($s.required // [])[] | select(. as $k | $v | has($k) | not) | "\($p): missing \"\(.)\""),
+       ($v | to_entries[] | . as $e
+         | if ($s.properties // {}) | has($e.key) then ($e.value | check($s.properties[$e.key]; "\($p).\($e.key)"))
+           elif $s.additionalProperties == false then "\($p): unexpected \"\($e.key)\""
+           else empty end)
+     else empty end),
+    (if $t == "array" then
+       (if $s.minItems != null and ($v | length) < $s.minItems then "\($p): fewer than \($s.minItems) items" else empty end),
+       (if $s.items != null then ($v | to_entries[] | .key as $i | .value | check($s.items; "\($p)[\($i)]")) else empty end)
+     else empty end)
+  end;
+def last_fence:
+  [splits("\n")] | reduce .[] as $l ({in: false, buf: [], last: null};
+    if ($l | test("^\\s*```")) then
+      (if .in then {in: false, buf: [], last: (.buf | join("\n"))} else .in = true | .buf = [] end)
+    elif .in then .buf += [$l] else . end) | .last;
+((last_fence // .) | try fromjson catch null) as $v
+| if $v == null then {value: null, errors: ["no JSON at the end of the answer"]}
+  else {value: $v, errors: [$v | check($schema; "$")]} end
+JQ
+
+schema_note() {
+  printf '\n\nEnd your final message with a JSON object in a ```json fence that matches this JSON Schema:\n%s' \
+    "$(jq -c . "$1")"
+}
+
+# announced <worker> <line>: the call's answer ends by announcing an action instead of taking
+# it ("Let me update the config:"), a habit of some cheaper models.
+announced() {
+  local last
+  last="$(tail -n +"$(($2 + 1))" "$1/events.jsonl" | jq -rs '[.[] | select(.type == "result")] | last | .result // ""' |
+    sed '/^[[:space:]]*$/d' | tail -n1)"
+  grep -Eiq "^[[:space:]]*((now|next|then),? )?(let me|i'll|i will|i'm going to|i am going to)\\b|:[[:space:]]*\$" <<<"$last"
+}
+
+# cmd_turn (`drovr _turn`, run detached by launch): one turn, supervised. Each claude call is
+# stopped when it goes silent for stallSeconds or spends past the budget. Then, at most once
+# each: a nudge if the answer announced an action it never took, and a repair if the answer's
+# JSON fails the worker's schema. Writes out.json and, last, exit.
+cmd_turn() {
+  local w="$1" cwd="$2" via="$3" rc=0 sid out
+  shift 3
+  set +e
+  cd "$cwd" || { echo 1 >"$w/exit"; return; }
+  call "$w" "$via" "$@" || rc=$?
+  if [ "$rc" = 0 ] && [ ! -e "$w/stopped" ] && [ "$(cfg '.nudge != false')" = true ] && announced "$w" "$(cat "$w/call_offset")"; then
+    sid="$(session_of "$w")"
+    call "$w" "$via" "Continue: do what you just said you would, then give your final answer." \
+      --resume "$sid" --permission-mode "$(cat "$w/mode")" || rc=$?
+  fi
+  if [ "$rc" = 0 ] && [ ! -e "$w/stopped" ] && [ -f "$w/schema.json" ]; then
+    out="$(check_answer "$w")"
+    if [ "$(jq '.errors | length' <<<"$out")" != 0 ]; then
+      sid="$(session_of "$w")"
+      call "$w" "$via" "Your final JSON did not match the schema:
+$(jq -r '.errors[] | "- " + .' <<<"$out")
+Reply with only the corrected JSON object in a \`\`\`json fence." \
+        --resume "$sid" --permission-mode "$(cat "$w/mode")" || rc=$?
+      out="$(check_answer "$w")"
+    fi
+    if [ "$(jq '.errors | length' <<<"$out")" = 0 ]; then
+      jq '.value' <<<"$out" >"$w/result.json"
+    else
+      jq -r '.errors[]' <<<"$out" >"$w/invalid"
+      [ "$rc" != 0 ] || rc=3
+    fi
+  fi
+  [ ! -e "$w/stopped" ] || rc=124
+  # The turn's final result event, in the shape `read` and `prompt` expect.
+  jq -c 'select(.type == "result")' "$w/events.jsonl" 2>/dev/null | tail -n1 >"$w/out.json"
+  echo "$rc" >"$w/exit"
+}
+
+# check_answer <worker>: {value, errors} for the answer of the last call against its schema.
+check_answer() {
+  tail -n +"$(($(cat "$1/call_offset") + 1))" "$1/events.jsonl" |
+    jq -rs '[.[] | select(.type == "result")] | last | .result // ""' |
+    jq -Rs --argjson schema "$(cat "$1/schema.json")" "$schema_jq"
+}
+
+session_of() { jq -rs 'map(.session_id // empty) | last // empty' "$1/events.jsonl" 2>/dev/null; }
+
+# call <worker> <provider> <claude args...>: one claude call in its own process group, watched.
+call() {
+  local w="$1" via="$2" off pid size last=-1 quiet=0 stall left rc=0
+  shift 2
+  off="$(wc -l <"$w/events.jsonl")"
+  echo "$off" >"$w/call_offset"
+  left="$(budget_left "$w")"
+  if [ -n "$left" ] && [ "$(jq -n --argjson l "$left" '$l <= 0')" = true ]; then
+    echo "no-budget: nothing left of the budget" >"$w/stopped"
+    return 125
+  fi
+  stall="$(cfg '.stallSeconds // 600')"
+  setsid env -u WEZTERM_PANE CLAUDE_CONFIG_DIR="$worker_config" "$self" claude "$via" -p "$@" "${worker_flags[@]}" \
+    --output-format stream-json --verbose >>"$w/events.jsonl" 2>>"$w/err.log" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    size="$(stat -c %s "$w/events.jsonl")"
+    if [ "$size" != "$last" ]; then
+      last="$size" quiet=0
+      if [ -n "$left" ] && [ "$(jq -n --argjson s "$(call_cost "$w" "$off")" --argjson l "$left" '$s > $l')" = true ]; then
+        halt "$w" "$pid" "over-budget: spent past the \$$(jq -n --argjson l "$left" '$l * 10000 | round / 10000') left"
+      fi
+    else
+      quiet=$((quiet + 1))
+      if [ "$stall" -gt 0 ] && [ "$quiet" -ge "$stall" ]; then
+        halt "$w" "$pid" "stalled: no output for ${quiet}s"
+      fi
+    fi
+  done
+  wait "$pid" || rc=$?
+  add_spend "$w" "$(call_cost "$w" "$off")"
+  return "$rc"
+}
+
+# halt <worker> <pid> <reason>: stop a call's whole process group and say why.
+halt() {
+  [ -e "$1/stopped" ] || echo "$3" >"$1/stopped"
+  kill -TERM -- "-$2" 2>/dev/null
+  sleep 2
+  kill -KILL -- "-$2" 2>/dev/null || true
 }
 
 cmd_run() {
-  local name="${1:-}" edit=0 scratch="" public=0 via="" task
+  local name="${1:-}" edit=0 scratch="" public=0 via="" budget="" schema="" task
   [ -n "$name" ] || usage
   shift
   while :; do
@@ -151,6 +334,8 @@ cmd_run() {
       --edit) edit=1; shift ;;
       --scratch) scratch="${2:-}"; shift 2 || usage ;;
       --via) via="${2:-}"; shift 2 || usage ;;
+      --budget) budget="${2:-}"; shift 2 || usage ;;
+      --schema) schema="${2:-}"; shift 2 || usage ;;
       *) break ;;
     esac
   done
@@ -160,6 +345,17 @@ cmd_run() {
   [ -n "$task" ] || usage
   shift
   [ "${1:-}" != "--" ] || shift
+  if [ -n "$budget" ]; then
+    [[ "$budget" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [ "$(jq -n "$budget > 0")" = true ] || die "--budget wants a positive USD amount"
+  fi
+  if [ -n "$budget" ] || [ -n "$(cfg '.dailyBudget // empty')" ]; then
+    # A budget is only as good as the price it is counted in; 0 is fine for a free model.
+    [ -n "$(price_of "$via")" ] || die "a budget needs a price for provider '$via' (see README)"
+  fi
+  if [ -n "$schema" ]; then
+    jq -e 'type == "object"' "$schema" >/dev/null 2>&1 || die "--schema '$schema' is not a JSON object"
+    task="$task$(schema_note "$schema")"
+  fi
 
   local w repo cwd mode only
   w="$(worker_dir "$name")"
@@ -203,6 +399,8 @@ cmd_run() {
   printf '%s\n' "$mode" >"$w/mode"
   printf '%s\n' "$via" >"$w/via"
   printf '%s\n' "$task" >"$w/task"
+  [ -z "$budget" ] || printf '%s\n' "$budget" >"$w/budget"
+  [ -z "$schema" ] || jq . "$schema" >"$w/schema.json"
   # The branch merge will go back into; empty when detached or in scratch mode.
   [ "$repo" = - ] || git -C "$repo" symbolic-ref --short -q HEAD >"$w/base" || : >"$w/base"
   launch "$cwd" "$w" "$via" "$task" --permission-mode "$mode" "$@"
@@ -210,13 +408,17 @@ cmd_run() {
 }
 
 cmd_prompt() {
-  local name="${1:-}" text="${2:-}" w sid
+  local name="${1:-}" text="${2:-}" w sid left
   [[ -n "$name" && -n "$text" ]] || usage
   w="$(worker_dir "$name")"
   [ -d "$w" ] || die "no worker '$name'"
   [ -e "$w/exit" ] || die "'$name' is still running; 'drovr wait $name' first"
-  sid="$(jq -r '.session_id // empty' "$w/out.json" 2>/dev/null)" || sid=""
+  # From any event, so a turn that was stopped before its result can still be resumed.
+  sid="$(session_of "$w")"
   [ -n "$sid" ] || die "'$name' has no session to resume (see $w/err.log)"
+  left="$(budget_left "$w")"
+  [ -z "$left" ] || [ "$(jq -n --argjson l "$left" '$l > 0')" = true ] || die "'$name' has no budget left"
+  [ ! -f "$w/schema.json" ] || text="$text$(schema_note "$w/schema.json")"
   launch "$(cat "$w/cwd")" "$w" "$(cat "$w/via")" "$text" --resume "$sid" --permission-mode "$(cat "$w/mode")"
   echo "drovr: $name resumed"
 }
@@ -238,10 +440,24 @@ cmd_wait() {
 }
 
 cmd_read() {
-  local name="${1:-}" w
+  local name="" json=0 w
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      *) [ -z "$name" ] || usage; name="$1"; shift ;;
+    esac
+  done
   [ -n "$name" ] || usage
   w="$(worker_dir "$name")"
   [ -e "$w/exit" ] || die "'$name' has not finished"
+  if [ "$json" = 1 ]; then
+    [ -f "$w/schema.json" ] || die "'$name' has no schema (run it with --schema)"
+    [ -f "$w/result.json" ] || die "'$name' has no valid JSON result; 'drovr read $name' says why"
+    cat "$w/result.json"
+    return
+  fi
+  # A stopped turn may still have an earlier answer; it is printed, but the exit says stopped.
+  [ ! -e "$w/stopped" ] || echo "drovr: $name was stopped, $(cat "$w/stopped")" >&2
   if ! jq -e -r '.result' "$w/out.json" 2>/dev/null; then
     echo "drovr: no result; stderr follows" >&2
     cat "$w/err.log" >&2
@@ -250,6 +466,12 @@ cmd_read() {
   # Talking back: what the worker wanted and was refused, for you to decide on.
   jq -r '.permission_denials[]? | "drovr: denied \(.tool_name) \(.tool_input.file_path // .tool_input.path // .tool_input.pattern // "")"' \
     "$w/out.json" >&2
+  if [ -e "$w/invalid" ]; then
+    echo "drovr: NOT DONE: the answer's JSON fails the schema, after one repair:" >&2
+    sed 's/^/drovr:   /' "$w/invalid" >&2
+    exit 3
+  fi
+  [ ! -e "$w/stopped" ] || exit 124
 }
 
 # progress <worker>: "turn N  <last tool> <target>" for the turn in flight.
@@ -267,19 +489,14 @@ progress() {
   echo "${line//"$cwd"\//}"
 }
 
-# cost <worker>: USD over every finished turn, from the provider's price (per 1M tokens).
+# cost <worker>: USD so far, from the provider's price (per 1M tokens): every finished call,
+# plus an estimate for the one in flight.
 cost() {
-  local w="$1" price
-  price="$(cfg --arg p "$(cat "$w/via" 2>/dev/null)" '.providers[$p].price // empty | tojson' 2>/dev/null)" || return 0
-  [ -n "$price" ] || return 0
-  jq -rs --argjson p "$price" '
-    [.[] | select(.type == "result") | .usage // {}] as $u
-    | if ($u | length) == 0 then empty else
-      ($u | map(((.input_tokens // 0) + (.cache_creation_input_tokens // 0)) * ($p.input // 0)
-               + (.cache_read_input_tokens // 0) * ($p.cachedInput // $p.input // 0)
-               + (.output_tokens // 0) * ($p.output // 0)) | add / 1e6)
-      | "$" + (. * 10000 | round / 10000 | tostring) end
-  ' "$w/events.jsonl" 2>/dev/null || true
+  local w="$1" running=0
+  [ -n "$(price_of "$(cat "$w/via" 2>/dev/null)")" ] || return 0
+  [ -e "$w/exit" ] || running="$(call_cost "$w" "$(cat "$w/call_offset" 2>/dev/null || echo 0)")"
+  jq -nr --argjson s "$(cat "$w/spent" 2>/dev/null || echo 0)" --argjson r "${running:-0}" \
+    '"$" + (($s + $r) * 10000 | round / 10000 | tostring)'
 }
 
 cmd_list() {
@@ -293,10 +510,13 @@ cmd_list() {
       status=running
       detail="$(progress "$w")"
     else
-      if [ "$(cat "$w/exit")" = 0 ]; then status="done"; else status="failed($(cat "$w/exit"))"; fi
+      if [ -e "$w/stopped" ]; then status="$(cut -d: -f1 "$w/stopped")"
+      elif [ -e "$w/invalid" ]; then status=invalid
+      elif [ "$(cat "$w/exit")" = 0 ]; then status="done"
+      else status="failed($(cat "$w/exit"))"; fi
       detail="$(jq -r '"turn \(.num_turns // "?")" + (if (.permission_denials | length) > 0 then "  \(.permission_denials | length) denied" else "" end)' "$w/out.json" 2>/dev/null)" || detail=""
     fi
-    printf '%-16s %-10s %-9s %-9s %s\n' "$name" "$status" "$(cat "$w/via" 2>/dev/null)" "$(cost "$w")" "$detail"
+    printf '%-16s %-12s %-9s %-9s %s\n' "$name" "$status" "$(cat "$w/via" 2>/dev/null)" "$(cost "$w")" "$detail"
   done
 }
 
@@ -407,6 +627,7 @@ main() {
     diff) shift; cmd_diff "$@" ;;
     merge) shift; cmd_merge "$@" ;;
     rm) shift; cmd_rm "$@" ;;
+    _turn) shift; cmd_turn "$@" ;;
     *) usage ;;
   esac
 }

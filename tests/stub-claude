@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Stands in for Claude Code: logs what drovr hands it, prints a short event stream.
+# Keywords in the prompt pick a behaviour: write, conflict, deny, hang, spend, announce,
+# json-good, json-bad (fixed by the repair prompt unless STUB_UNFIXABLE is set).
 {
   printf 'argv:'; printf ' %q' "$@"; echo
   echo "cwd=$PWD"
@@ -18,8 +20,26 @@ sleep "${STUB_SLEEP:-0}"
 # Edits the way a worker would: new file, or a change to a.txt.
 [[ "$prompt" != *write* ]] || echo "from the worker" >worker.txt
 [[ "$prompt" != *conflict* ]] || echo "worker version" >a.txt
-echo '{"type":"system","subtype":"init"}'
+echo '{"type":"system","subtype":"init","session_id":"'"$sid"'"}'
+# Silent from here on: drovr should call it stalled.
+[[ "$prompt" != *hang* ]] || exec sleep 60
 echo '{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","name":"Read","input":{"file_path":"'"$PWD"'/a.txt"}}]}}'
+if [[ "$prompt" == *spend* ]]; then
+  # 5M input tokens at the test price of $1 per 1M, then it keeps going.
+  echo '{"type":"assistant","message":{"id":"m2","usage":{"input_tokens":5000000},"content":[{"type":"text","text":"working"}]}}'
+  exec sleep 60
+fi
+answer="answer to: $prompt"
+[[ "$prompt" != *announce* ]] || answer=$'Read the file.\nLet me now update the config:'
+# shellcheck disable=SC2016 # the backticks are a literal markdown fence
+fence() { printf 'Summary.\n```json\n%s\n```' "$1"; }
+[[ "$prompt" != *json-good* ]] || answer="$(fence '{"done": true, "files": ["a.txt"]}')"
+[[ "$prompt" != *json-bad* ]] || answer="$(fence '{"done": "yes"}')"
+if [[ "$prompt" == *"did not match the schema"* ]]; then
+  if [ -n "${STUB_UNFIXABLE:-}" ]; then answer="$(fence '{"files": 3}')"; else answer="$(fence '{"done": false, "files": []}')"; fi
+fi
 denials='[]'
 [[ "$prompt" != *deny* ]] || denials='[{"tool_name":"Read","tool_input":{"file_path":"/etc/shadow"}}]'
-echo '{"type":"result","result":"answer to: '"$prompt"'","session_id":"'"$sid"'","num_turns":2,"permission_denials":'"$denials"',"usage":{"input_tokens":1000000,"cache_read_input_tokens":1000000,"output_tokens":1000000}}'
+jq -nc --arg r "$answer" --arg sid "$sid" --argjson d "$denials" \
+  '{type: "result", result: $r, session_id: $sid, num_turns: 2, permission_denials: $d,
+    usage: {input_tokens: 1000000, cache_read_input_tokens: 1000000, output_tokens: 1000000}}'

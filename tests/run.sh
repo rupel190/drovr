@@ -26,6 +26,7 @@ cat >"$XDG_CONFIG_HOME/drovr/config.json" <<EOF
 {
   "claude": "$here/stub-claude",
   "defaultProvider": "deep",
+  "stallSeconds": 5,
   "allowedRepos": ["$tmp/priv"],
   "providers": {
     "deep": { "baseUrl": "https://deep.example/anthropic", "model": "deep-pro", "keyFile": "$tmp/key",
@@ -151,6 +152,70 @@ STUB_SLEEP=3 d run slow --scratch "$tmp/brief" "slow" >/dev/null
 expect "status shows running" "1▶" d status
 d wait slow 20 >/dev/null
 
+# stall: a silent worker is stopped, not waited on forever
+d run hg --scratch "$tmp/brief" "hang" >/dev/null
+d wait hg 30 >/dev/null
+[ "$(cat "$XDG_STATE_HOME/drovr/hg/exit")" = 124 ] && ok "silent worker is stopped (exit 124)" || no "stall exit"
+expect "list says stalled" "stalled" d list
+expect "read says why it stopped" "stalled: no output for 5s" d read hg
+pgrep -f "sleep 60" >/dev/null && no "stalled worker's process group is gone" || ok "stalled worker's process group is gone"
+
+# budget: one wallet per worker, plus a daily one, both only shrinking
+expect "budget must be a number" "positive USD" in_dir "$tmp/brief" d run b0 --scratch "$tmp/brief" --budget abc "t"
+expect "budget needs a price" "needs a price for provider 'alt'" in_dir "$tmp/brief" d run b1 --scratch "$tmp/brief" --via alt --budget 1 "t"
+d run bg --scratch "$tmp/brief" --budget 1 "spend" >/dev/null
+d wait bg 30 >/dev/null
+[ "$(cat "$XDG_STATE_HOME/drovr/bg/exit")" = 124 ] && ok "worker past its budget is stopped" || no "budget exit"
+expect "list says over-budget" "over-budget" d list
+expect "read names the cap" 'spent past the $1 left' d read bg
+expect "no follow-up once the budget is gone" "has no budget left" d prompt bg "more"
+jq '.dailyBudget = 1' "$XDG_CONFIG_HOME/drovr/config.json" >"$tmp/daily.json"
+DROVR_CONFIG="$tmp/daily.json" bash "$drovr" run dy --scratch "$tmp/brief" "t" >/dev/null
+DROVR_CONFIG="$tmp/daily.json" bash "$drovr" wait dy 20 >/dev/null
+expect "today's spend already exceeds dailyBudget" "no-budget" env DROVR_CONFIG="$tmp/daily.json" bash "$drovr" list
+expect "dailyBudget needs a price too" "needs a price" in_dir "$tmp/brief" env DROVR_CONFIG="$tmp/daily.json" bash "$drovr" run d2 --scratch "$tmp/brief" --via alt "t"
+
+# nudge: an answer that announces an action gets one "continue"
+: >"$STUB_LOG"
+d run an --scratch "$tmp/brief" "announce" >/dev/null
+d wait an 20 >/dev/null
+[ "$(grep -c '^argv:' "$STUB_LOG")" = 2 ] && grep -q "Continue:" "$STUB_LOG" &&
+  ok "announced action gets exactly one nudge" || no "nudge" "$(grep -c '^argv:' "$STUB_LOG") calls"
+expect "the nudge's answer is the one read" "answer to: Continue" d read an
+expect "both calls are counted" '$6.2' d list
+jq '.nudge = false' "$XDG_CONFIG_HOME/drovr/config.json" >"$tmp/nonudge.json"
+: >"$STUB_LOG"
+DROVR_CONFIG="$tmp/nonudge.json" bash "$drovr" run an2 --scratch "$tmp/brief" "announce" >/dev/null
+DROVR_CONFIG="$tmp/nonudge.json" bash "$drovr" wait an2 20 >/dev/null
+[ "$(grep -c "^argv:" "$STUB_LOG")" = 1 ] && ok "nudge: false turns it off" || no "nudge off" "$(grep -c "^argv:" "$STUB_LOG") calls; $(cat "$XDG_STATE_HOME/drovr/an2/err.log")"
+
+# schema: validated answer, one repair, otherwise not done
+cat >"$tmp/schema.json" <<'EOF'
+{ "type": "object", "required": ["done", "files"], "additionalProperties": false,
+  "properties": { "done": { "type": "boolean" }, "files": { "type": "array", "items": { "type": "string" } } } }
+EOF
+expect "schema must be a JSON object" "not a JSON object" in_dir "$tmp/brief" d run s0 --scratch "$tmp/brief" --schema "$tmp/brief/a.txt" "t"
+: >"$STUB_LOG"
+d run sg --scratch "$tmp/brief" --schema "$tmp/schema.json" "json-good" >/dev/null
+d wait sg 20 >/dev/null
+grep -q "matches this JSON Schema" "$STUB_LOG" && ok "task carries the schema" || no "schema in task"
+expect "read --json gives the checked object" '"done": true' d read sg --json
+d run sb --scratch "$tmp/brief" --schema "$tmp/schema.json" "json-bad" >/dev/null
+d wait sb 20 >/dev/null
+grep -q -- '- $.done: expected boolean, got string' "$STUB_LOG" && ok "repair prompt quotes the validator" || no "repair prompt"
+expect "repaired answer passes" '"done": false' d read sb --json
+STUB_UNFIXABLE=1 d run su --scratch "$tmp/brief" --schema "$tmp/schema.json" "json-bad" >/dev/null
+d wait su 20 >/dev/null
+expect "still invalid after one repair is NOT DONE" 'NOT DONE' d read su
+d read su >/dev/null 2>&1; [ $? = 3 ] && ok "read exits 3 when invalid" || no "invalid exit"
+expect "errors are listed" 'missing "done"' d read su
+expect "read --json refuses" "no valid JSON result" d read su --json
+expect "list says invalid" "invalid" d list
+: >"$STUB_LOG"
+d prompt sg "again"
+d wait sg 20 >/dev/null
+grep -q "matches this JSON Schema" "$STUB_LOG" && ok "follow-up carries the schema too" || no "schema on prompt"
+
 # claude subcommand
 expect "missing key file is reported" "key file $tmp/missing not readable" d claude nokey -p hi
 
@@ -164,6 +229,18 @@ for case in "git@github.com:o/r.git|https://github.com/o/r.git" "ssh://git@host.
   got="$(public_url "$tmp/other")"
   [ "$got" = "${case#*|}" ] && ok "public_url ${case%%|*}" || no "public_url ${case%%|*}" "got $got"
 done
+
+# schema checker (function only)
+# shellcheck disable=SC2154 # schema_jq comes from the sourced drovr.sh
+sc() { jq -Rs --argjson schema "$1" "$schema_jq" <<<"$2" | jq -c .errors; }
+[ "$(sc '{"type":"integer"}' '3')" = '[]' ] && [ "$(sc '{"type":"integer"}' '3.5')" != '[]' ] &&
+  ok "integer is a whole number" || no "integer"
+[ "$(sc '{"enum":["a","b"]}' '"c"')" = '["$: must be one of [\"a\",\"b\"]"]' ] && ok "enum" || no "enum" "$(sc '{"enum":["a","b"]}' '"c"')"
+[ "$(sc '{"type":"array","minItems":1}' '[]')" = '["$: fewer than 1 items"]' ] && ok "minItems" || no "minItems"
+[ "$(sc '{"type":"object"}' 'no json here')" = '["no JSON at the end of the answer"]' ] && ok "prose without JSON is an error" || no "no json"
+[ "$(sc '{"type":"object"}' $'```json\n{"a":1}\n```\nthen\n```json\n{"b":2}\n```')" = '[]' ] &&
+  [ "$(jq -Rs --argjson schema '{}' "$schema_jq" <<<$'```json\n{"a":1}\n```\n```json\n{"b":2}\n```' | jq -c .value)" = '{"b":2}' ] &&
+  ok "the last fence wins" || no "last fence"
 
 echo
 echo "$pass passed, $fail failed"

@@ -73,7 +73,10 @@ install -Dm644 SKILL.md ~/.claude/skills/drovr/SKILL.md   # optional
 
 The key is read from `keyFile` at launch, never stored in the config. `authVar` picks
 `ANTHROPIC_AUTH_TOKEN` (default) or `ANTHROPIC_API_KEY`; `price` (USD per 1M tokens) is
-optional and fills the cost column of `drovr list`.
+optional and fills the cost column of `drovr list`. Budgets need it; use 0 for a free model.
+
+Optional top-level keys: `stallSeconds` (default 600, 0 turns it off), `dailyBudget` (USD,
+all workers together) and `nudge` (default true). See [Supervision](#supervision).
 
 ### home-manager
 
@@ -97,9 +100,10 @@ The module writes the config, installs the skill, and adds `claude-<name>` short
 ## Usage
 
 ```bash
-drovr run <name> [--edit | --scratch <dir>] [--via <provider>] "<task>"
+drovr run <name> [--edit | --scratch <dir>] [--via <provider>] [--budget <usd>] [--schema <file>] "<task>"
 drovr wait <name> [seconds]
 drovr read <name>        # answer, then any denied tool calls
+drovr read <name> --json # only the schema-checked JSON (--schema workers)
 drovr prompt <name> "<follow-up>"
 drovr list               # each worker: status, cost, turn, current action
 drovr status             # one line for a prompt or status bar: "2▶ 1✓ 1✗"
@@ -111,6 +115,39 @@ drovr path <name> | providers | rm <name>
 
 For WezTerm, `weztermHelper = true` installs `~/.local/share/drovr/wezterm.lua`, which
 reads drovr's state without spawning a process (usage in the file's header).
+
+## Supervision
+
+Every turn runs under a small supervisor, because a cheap model failing quietly costs more
+than one failing loudly.
+
+- **Silence, not slowness, stops a worker.** A model that is thinking still streams events
+  every few tokens, so a worker with no event for `stallSeconds` is stuck: drovr stops its
+  whole process group and `read` says `stalled`. A long but busy turn is never cut short.
+  One silence is normal: while the model writes a single large block (a big `Write`), no
+  event arrives until the block is done — about 20 s for 1.6k tokens on DeepSeek. The
+  default 600 s covers Claude Code's 32k output cap at ~55 tokens/s; raise it for a slower
+  provider.
+- **Budgets only shrink.** `--budget <usd>` caps one worker across all of its turns,
+  follow-ups included; `dailyBudget` caps all workers together per day (a ledger in
+  `~/.local/state/drovr/spend.jsonl`). Each call gets the smaller of what is left, and is
+  stopped when it spends past it (`over-budget`). Input cost is exact while a call runs;
+  output is estimated from the streamed thinking-token counts and content until the call
+  ends, when the provider's usage replaces the estimate.
+- **One nudge for an announced action.** Some cheaper models end with "Let me update the
+  config:" and stop. When the answer's last line announces an action like that, drovr
+  resumes the worker once with "continue". `"nudge": false` turns it off.
+- **A schema, one repair, then "not done".** `--schema <file>` appends the schema to the task
+  (and to every follow-up) and checks the JSON the answer ends with: the last ```` ```json ````
+  fence, else the whole answer. A failing answer gets one repair turn that quotes the
+  errors; if that fails too, `read` prints `NOT DONE` with the errors and exits 3, and
+  `read --json` refuses. drovr checks a subset of JSON Schema without dependencies: `type`,
+  `enum`, `required`, `properties`, `additionalProperties: false`, `items`, `minItems` and
+  `minLength`.
+
+Claude Code has its own `--max-budget-usd` and `--json-schema`; drovr does not use them,
+because the first prices tokens with Claude Code's own table, which does not know other
+providers' models, and the second needs structured-output support from the provider.
 
 ## Tests
 

@@ -34,9 +34,10 @@ let
   # The config drovr reads; null options are left out.
   settings = {
     claude = lib.getExe cfg.claudePackage;
-    inherit (cfg) defaultProvider allowedRepos;
+    inherit (cfg) defaultProvider allowedRepos stallSeconds nudge;
     providers = lib.mapAttrs (_: p: lib.filterAttrsRecursive (_: v: v != null) p) cfg.providers;
-  };
+  }
+  // lib.optionalAttrs (cfg.dailyBudget != null) { inherit (cfg) dailyBudget; };
 
   price = lib.types.submodule {
     options = {
@@ -81,7 +82,7 @@ let
       price = lib.mkOption {
         type = lib.types.nullOr price;
         default = null;
-        description = "Token prices for the cost column of `drovr list`.";
+        description = "Token prices for the cost column of `drovr list` and for budgets (0 for a free model).";
         example = {
           input = 0.66;
           cachedInput = 0.022;
@@ -128,6 +129,25 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ ];
       description = "Private repo roots (and everything under them) where drovr may start workers; each also needs a DROVR.md.";
+    };
+
+    stallSeconds = lib.mkOption {
+      type = lib.types.ints.unsigned;
+      default = 600;
+      description = "Stop a worker after this many seconds without a single event (0: never). A model that is thinking still streams events, so silence means stuck.";
+    };
+
+    dailyBudget = lib.mkOption {
+      type = lib.types.nullOr lib.types.number;
+      default = null;
+      description = "USD all workers together may spend per day; each call gets what is left. Needs a price on every provider used.";
+      example = 5;
+    };
+
+    nudge = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "When an answer ends by announcing an action (\"Let me update the config:\") instead of taking it, resume the worker once with \"continue\".";
     };
 
     weztermHelper = lib.mkOption {
