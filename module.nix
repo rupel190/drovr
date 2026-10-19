@@ -37,7 +37,7 @@ let
     inherit (cfg) defaultProvider allowedRepos stallSeconds nudge;
     providers = lib.mapAttrs (_: p: lib.filterAttrsRecursive (_: v: v != null) p) cfg.providers;
   }
-  // lib.optionalAttrs (cfg.dailyBudget != null) { inherit (cfg) dailyBudget; };
+  // lib.filterAttrs (_: v: v != null) { inherit (cfg) dailyBudget dailySoftLimit dailyWarn; };
 
   price = lib.types.submodule {
     options = {
@@ -142,6 +142,20 @@ in
       default = null;
       description = "USD all workers together may spend per day; each call gets what is left. Needs a price on every provider used.";
       example = 5;
+    };
+
+    dailySoftLimit = lib.mkOption {
+      type = lib.types.nullOr lib.types.number;
+      default = null;
+      description = "USD per day after which drovr refuses new calls. Unlike dailyBudget it never stops a call that is running, so no turn is cut off halfway.";
+      example = 5;
+    };
+
+    dailyWarn = lib.mkOption {
+      type = lib.types.nullOr lib.types.number;
+      default = null;
+      description = "USD per day after which run, prompt, list and status (including the WezTerm helper) show a warning.";
+      example = 2;
     };
 
     nudge = lib.mkOption {

@@ -75,8 +75,9 @@ The key is read from `keyFile` at launch, never stored in the config. `authVar` 
 `ANTHROPIC_AUTH_TOKEN` (default) or `ANTHROPIC_API_KEY`; `price` (USD per 1M tokens) is
 optional and fills the cost column of `drovr list`. Budgets need it; use 0 for a free model.
 
-Optional top-level keys: `stallSeconds` (default 600, 0 turns it off), `dailyBudget` (USD,
-all workers together) and `nudge` (default true). See [Supervision](#supervision).
+Optional top-level keys: `stallSeconds` (default 600, 0 turns it off), `dailyWarn`,
+`dailySoftLimit` and `dailyBudget` (USD per day, all workers together) and `nudge` (default
+true). See [Supervision](#supervision).
 
 ### home-manager
 
@@ -134,6 +135,10 @@ than one failing loudly.
   stopped when it spends past it (`over-budget`). Input cost is exact while a call runs;
   output is estimated from the streamed thinking-token counts and content until the call
   ends, when the provider's usage replaces the estimate.
+- **Two softer daily lines.** Past `dailyWarn`, `run`, `prompt`, `list` and `status` show
+  `⚠`, and so does the WezTerm helper. Past `dailySoftLimit`, drovr refuses new calls
+  (`soft-limit`) but lets a running one finish; `dailyBudget` is the hard line that stops a
+  call mid-way.
 - **One nudge for an announced action.** Some cheaper models end with "Let me update the
   config:" and stop. When the answer's last line announces an action like that, drovr
   resumes the worker once with "continue". `"nudge": false` turns it off.

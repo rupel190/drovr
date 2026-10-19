@@ -94,7 +94,8 @@ Names: `[a-z][a-z0-9-]*`, unique among live workers. Repo mode runs from inside 
 - A refusal from drovr (allowlist, missing DROVR.md, provider not allowed) is the user's policy, not a bug to route around.
 - Several independent workers may run at once; keep each task to one concern.
 - A failed run prints its stderr on `drovr read`. Report it; do not retry blindly.
-- **Stopped workers** show `stalled`, `over-budget` or `no-budget` in `drovr list`, and `drovr read` says why. A stalled worker can be resumed with `drovr prompt`; an over-budget one cannot. Raise neither limit on your own: tell the user.
+- **A `⚠` line about today's spend** (from `run`, `prompt` or `list`): tell the user, once.
+- **Stopped workers** show `stalled`, `over-budget`, `no-budget` or `soft-limit` in `drovr list`, and `drovr read` says why. A stalled worker can be resumed with `drovr prompt`; an over-budget one cannot. Raise neither limit on your own: tell the user.
 - **For results you will process, use `--schema`** (e.g. `{"type":"object","required":["done","files_changed","unverified"], ...}`). drovr repairs a bad answer once; after that `read` prints `NOT DONE` and exits 3. Treat that as not done, never as a summary to relay. A valid schema still proves only the *shape*: `done: true` is the worker's claim, so check the diff.
 - `drovr read` also lists what the worker was **denied** (`drovr: denied <tool> <path>`). Decide whether that matters, ask the user if it touches policy, and continue with `drovr prompt` if useful.
 - Commit first if the worker must see your latest changes: it works from HEAD, not your working tree.

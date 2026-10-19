@@ -165,6 +165,44 @@ add_spend() {
     mv "$w/spent.tmp" "$w/spent"
   jq -nc --arg day "$(date +%F)" --arg worker "${w##*/}" --argjson usd "$usd" \
     '{day: $day, worker: $worker, usd: $usd}' >>"$state_root/spend.jsonl"
+  # Past dailyWarn: "<day> <usd>" in a file, so a status bar can show it without parsing
+  # the ledger. It carries its day, so it expires on its own.
+  local warn today
+  warn="$(cfg '.dailyWarn // empty')"
+  [ -n "$warn" ] || return 0
+  today="$(spent_today)"
+  [ "$(jq -n --argjson t "$today" --argjson w "$warn" '$t >= $w')" = true ] || return 0
+  echo "$(date +%F) $(today_usd)" >"$state_root/warning"
+}
+
+spent_today() {
+  jq -s --arg day "$(date +%F)" 'map(select(.day == $day) | .usd) | add // 0' \
+    "$state_root/spend.jsonl" 2>/dev/null || echo 0
+}
+
+# today_usd: the day's spend, rounded to cents.
+today_usd() { jq -n --argjson t "$(spent_today)" '$t * 100 | round / 100'; }
+
+# warning: "today's drovr spend is $X (warning at $Y)" once past dailyWarn, else nothing.
+# Counted from the ledger, so it holds even before the next spend writes the status file.
+warning() {
+  local warn
+  warn="$(cfg '.dailyWarn // empty')"
+  [ -n "$warn" ] || return 0
+  [ "$(jq -n --argjson t "$(spent_today)" --argjson w "$warn" '$t >= $w')" = true ] || return 0
+  echo "today's drovr spend is \$$(today_usd) (warning at \$$warn)"
+}
+
+# soft_limit_hit: the day's spend reached dailySoftLimit. Unlike dailyBudget it never stops
+# a call that is running; it only refuses new calls, so no turn is cut off halfway.
+soft_limit_hit() {
+  local soft
+  soft="$(cfg '.dailySoftLimit // empty')"
+  [ -n "$soft" ] && [ "$(jq -n --argjson t "$(spent_today)" --argjson s "$soft" '$t >= $s')" = true ]
+}
+
+soft_limit_note() {
+  echo "today's drovr spend \$$(today_usd) reached dailySoftLimit \$$(cfg '.dailySoftLimit'); raise it in the config to go on"
 }
 
 # budget_left <worker>: USD this worker may still spend, or nothing when uncapped. Its own
@@ -175,8 +213,7 @@ budget_left() {
   own="$(cat "$w/budget" 2>/dev/null)" || own=""
   daily="$(cfg '.dailyBudget // empty')"
   [ -n "$own$daily" ] || return 0
-  today="$(jq -s --arg day "$(date +%F)" 'map(select(.day == $day) | .usd) | add // 0' \
-    "$state_root/spend.jsonl" 2>/dev/null)" || today=0
+  today="$(spent_today)"
   jq -nr --arg own "$own" --arg daily "$daily" --argjson spent "$(cat "$w/spent" 2>/dev/null || echo 0)" \
     --argjson today "${today:-0}" '
     [(if $own != "" then ($own | tonumber) - $spent else empty end),
@@ -288,6 +325,10 @@ call() {
   shift 2
   off="$(wc -l <"$w/events.jsonl")"
   echo "$off" >"$w/call_offset"
+  if soft_limit_hit; then
+    echo "soft-limit: $(soft_limit_note)" >"$w/stopped"
+    return 125
+  fi
   left="$(budget_left "$w")"
   if [ -n "$left" ] && [ "$(jq -n --argjson l "$left" '$l <= 0')" = true ]; then
     echo "no-budget: nothing left of the budget" >"$w/stopped"
@@ -326,7 +367,7 @@ halt() {
 }
 
 cmd_run() {
-  local name="${1:-}" edit=0 scratch="" public=0 via="" budget="" schema="" task
+  local name="${1:-}" edit=0 scratch="" public=0 via="" budget="" schema="" task note
   [ -n "$name" ] || usage
   shift
   while :; do
@@ -348,10 +389,11 @@ cmd_run() {
   if [ -n "$budget" ]; then
     [[ "$budget" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [ "$(jq -n "$budget > 0")" = true ] || die "--budget wants a positive USD amount"
   fi
-  if [ -n "$budget" ] || [ -n "$(cfg '.dailyBudget // empty')" ]; then
+  if [ -n "$budget" ] || [ -n "$(cfg '.dailyBudget // .dailySoftLimit // .dailyWarn // empty')" ]; then
     # A budget is only as good as the price it is counted in; 0 is fine for a free model.
     [ -n "$(price_of "$via")" ] || die "a budget needs a price for provider '$via' (see README)"
   fi
+  ! soft_limit_hit || die "$(soft_limit_note)"
   if [ -n "$schema" ]; then
     jq -e 'type == "object"' "$schema" >/dev/null 2>&1 || die "--schema '$schema' is not a JSON object"
     task="$task$(schema_note "$schema")"
@@ -405,10 +447,12 @@ cmd_run() {
   [ "$repo" = - ] || git -C "$repo" symbolic-ref --short -q HEAD >"$w/base" || : >"$w/base"
   launch "$cwd" "$w" "$via" "$task" --permission-mode "$mode" "$@"
   echo "drovr: $name started on $via in $cwd ($mode$([ "$public" = 0 ] || echo ", public repo"))"
+  note="$(warning)"
+  [ -z "$note" ] || echo "drovr: ⚠ $note" >&2
 }
 
 cmd_prompt() {
-  local name="${1:-}" text="${2:-}" w sid left
+  local name="${1:-}" text="${2:-}" w sid left note
   [[ -n "$name" && -n "$text" ]] || usage
   w="$(worker_dir "$name")"
   [ -d "$w" ] || die "no worker '$name'"
@@ -418,9 +462,12 @@ cmd_prompt() {
   [ -n "$sid" ] || die "'$name' has no session to resume (see $w/err.log)"
   left="$(budget_left "$w")"
   [ -z "$left" ] || [ "$(jq -n --argjson l "$left" '$l > 0')" = true ] || die "'$name' has no budget left"
+  ! soft_limit_hit || die "$(soft_limit_note)"
   [ ! -f "$w/schema.json" ] || text="$text$(schema_note "$w/schema.json")"
   launch "$(cat "$w/cwd")" "$w" "$(cat "$w/via")" "$text" --resume "$sid" --permission-mode "$(cat "$w/mode")"
   echo "drovr: $name resumed"
+  note="$(warning)"
+  [ -z "$note" ] || echo "drovr: ⚠ $note" >&2
 }
 
 cmd_wait() {
@@ -500,7 +547,7 @@ cost() {
 }
 
 cmd_list() {
-  local w name status detail
+  local w name status detail note
   [ -d "$state_root" ] || return 0
   for w in "$state_root"/*/; do
     [ -f "$w/cwd" ] || continue
@@ -518,6 +565,8 @@ cmd_list() {
     fi
     printf '%-16s %-12s %-9s %-9s %s\n' "$name" "$status" "$(cat "$w/via" 2>/dev/null)" "$(cost "$w")" "$detail"
   done
+  note="$(warning)"
+  [ -z "$note" ] || echo "⚠ $note"
 }
 
 # status: one line for a prompt or status bar ("2▶ 1✓ 1✗"), empty when idle.
@@ -532,6 +581,7 @@ cmd_status() {
   [ "$run" = 0 ] || out+=("$run▶")
   [ "$ok" = 0 ] || out+=("$ok✓")
   [ "$bad" = 0 ] || out+=("$bad✗")
+  [ -z "$(warning)" ] || out+=("⚠\$$(today_usd)")
   [ "${#out[@]}" = 0 ] || echo "${out[*]}"
 }
 

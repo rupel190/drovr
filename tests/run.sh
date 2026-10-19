@@ -175,6 +175,18 @@ DROVR_CONFIG="$tmp/daily.json" bash "$drovr" wait dy 20 >/dev/null
 expect "today's spend already exceeds dailyBudget" "no-budget" env DROVR_CONFIG="$tmp/daily.json" bash "$drovr" list
 expect "dailyBudget needs a price too" "needs a price" in_dir "$tmp/brief" env DROVR_CONFIG="$tmp/daily.json" bash "$drovr" run d2 --scratch "$tmp/brief" --via alt "t"
 
+# dailyWarn and dailySoftLimit: a warning, then no new calls, never a cut-off call
+jq '.dailyWarn = 1 | .dailySoftLimit = 1000' "$XDG_CONFIG_HOME/drovr/config.json" >"$tmp/warn.json"
+expect "past dailyWarn, run warns" "⚠ today's drovr spend is" in_dir "$tmp/brief" env DROVR_CONFIG="$tmp/warn.json" bash "$drovr" run wn --scratch "$tmp/brief" "t"
+DROVR_CONFIG="$tmp/warn.json" bash "$drovr" wait wn 20 >/dev/null
+expect "status shows the warning" '⚠$' env DROVR_CONFIG="$tmp/warn.json" bash "$drovr" status
+expect "list shows the warning" "(warning at \$1)" env DROVR_CONFIG="$tmp/warn.json" bash "$drovr" list
+grep -q "^$(date +%F) [0-9.]*$" "$XDG_STATE_HOME/drovr/warning" && ok "status-bar file carries day and spend" || no "warning file"
+jq '.dailySoftLimit = 1' "$XDG_CONFIG_HOME/drovr/config.json" >"$tmp/soft.json"
+expect "past dailySoftLimit, run is refused" "reached dailySoftLimit \$1" in_dir "$tmp/brief" env DROVR_CONFIG="$tmp/soft.json" bash "$drovr" run sl --scratch "$tmp/brief" "t"
+expect "and so is a follow-up" "reached dailySoftLimit" env DROVR_CONFIG="$tmp/soft.json" bash "$drovr" prompt wn "more"
+expect "soft limit needs a price" "needs a price" in_dir "$tmp/brief" env DROVR_CONFIG="$tmp/soft.json" bash "$drovr" run sp --scratch "$tmp/brief" --via alt "t"
+
 # nudge: an answer that announces an action gets one "continue"
 : >"$STUB_LOG"
 d run an --scratch "$tmp/brief" "announce" >/dev/null

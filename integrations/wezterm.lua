@@ -3,7 +3,7 @@
 --
 --   local drovr = dofile(os.getenv("HOME") .. "/.local/share/drovr/wezterm.lua")
 --   wezterm.on("update-status", function(window)
---     window:set_right_status(drovr.status())  -- e.g. "drovr 2▶ 1✓"
+--     window:set_right_status(drovr.status())  -- e.g. "drovr 2▶ 1✓ ⚠$2.41"
 --   end)
 --
 -- Call it from update-status: wezterm.read_dir is async and fails elsewhere.
@@ -41,13 +41,25 @@ function M.counts()
   return run, done, failed
 end
 
--- status([prefix]) -> "drovr 2▶ 1✓ 1✗", or "" when there are no workers.
+-- warning() -> "⚠$2.41" once today's spend is past dailyWarn, else nil. drovr writes
+-- "<day> <usd>" to a file; a line from an earlier day has expired.
+function M.warning()
+  local line = read_line(root .. "/warning")
+  if not line then return nil end
+  local day, usd = line:match("^(%S+) (%S+)$")
+  if day ~= os.date("%Y-%m-%d") then return nil end
+  return "⚠$" .. usd
+end
+
+-- status([prefix]) -> "drovr 2▶ 1✓ 1✗ ⚠$2.41", or "" when there is nothing to show.
 function M.status(prefix)
   local run, done, failed = M.counts()
   local parts = {}
   if run > 0 then table.insert(parts, run .. "▶") end
   if done > 0 then table.insert(parts, done .. "✓") end
   if failed > 0 then table.insert(parts, failed .. "✗") end
+  local warn = M.warning()
+  if warn then table.insert(parts, warn) end
   if #parts == 0 then return "" end
   return (prefix or "drovr ") .. table.concat(parts, " ")
 end
