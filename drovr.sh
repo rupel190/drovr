@@ -20,8 +20,8 @@ die() { echo "drovr: $*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-usage: drovr run <name> [--edit | --scratch <dir>] [--via <provider>] [--budget <usd>]
-                 [--schema <file>] <task> [-- <claude args>...]
+usage: drovr run <name> [--edit | --scratch <dir>] [--via <provider>] [--model <id>]
+                 [--effort <level>] [--budget <usd>] [--schema <file>] <task> [-- <claude args>...]
        drovr prompt <name> <text>      follow-up turn in the same session
        drovr wait <name> [seconds]     block until the turn ends (default: no limit)
        drovr read <name> [--json]      print the worker's final answer (--json: only its
@@ -33,6 +33,7 @@ usage: drovr run <name> [--edit | --scratch <dir>] [--via <provider>] [--budget 
        drovr list                      workers with cost, turn and current action
        drovr status                    one-line summary for a prompt or status bar
        drovr providers
+       drovr models                    every provider's models with price and default effort
        drovr claude <provider> [args]  run Claude Code against a provider
        drovr rm <name>                 drop the worker (and its worktree, if clean)
 EOF
@@ -134,14 +135,31 @@ launch() {
   setsid -f "$self" _turn "$w" "$cwd" "$via" "$@" </dev/null >/dev/null 2>>"$w/err.log"
 }
 
-price_of() { cfg --arg p "$1" '.providers[$p].price // empty | tojson' 2>/dev/null || true; }
+efforts="low medium high xhigh max"
+
+# model_cfg <provider> <model>: {price, effort} for one model, nulls left out. The provider's
+# own model takes the provider's price and effort, overridden by its `models` entry; any other
+# model gets only what its `models` entry says, so an unlisted model has no price at all
+# rather than the provider's, which would be wrong.
+model_cfg() {
+  cfg -c --arg p "$1" --arg m "$2" '.providers[$p] as $v
+    | (if $m == $v.model then {price: $v.price, effort: $v.effort} else {} end) + ($v.models[$m] // {})
+    | with_entries(select(.value != null))' 2>/dev/null || echo '{}'
+}
+
+price_of() { model_cfg "$1" "$2" | jq -c '.price // empty'; }
+
+# worker_model <worker>: the model it runs (workers from before --model: the provider's).
+worker_model() {
+  cat "$1/model" 2>/dev/null || cfg --arg p "$(cat "$1/via")" '.providers[$p].model'
+}
 
 # call_cost <worker> <line>: USD of the claude call whose events start after <line>. Exact
 # once its result event exists. Before that, input is exact (each assistant message carries
 # it) but output is only streamed as thinking-token counts and content, so it is estimated.
 call_cost() {
   local w="$1" off="$2" price
-  price="$(price_of "$(cat "$w/via" 2>/dev/null)")"
+  price="$(price_of "$(cat "$w/via" 2>/dev/null)" "$(worker_model "$w")")"
   [ -n "$price" ] || return 0
   tail -n +"$((off + 1))" "$w/events.jsonl" 2>/dev/null | jq -rs --argjson p "$price" '
     def usd(u; out): ((u.input_tokens // 0) + (u.cache_creation_input_tokens // 0)) * ($p.input // 0)
@@ -164,7 +182,8 @@ add_spend() {
   jq -n --argjson a "$(cat "$w/spent" 2>/dev/null || echo 0)" --argjson b "$usd" '$a + $b' >"$w/spent.tmp" &&
     mv "$w/spent.tmp" "$w/spent"
   jq -nc --arg day "$(date +%F)" --arg worker "${w##*/}" --argjson usd "$usd" \
-    '{day: $day, worker: $worker, usd: $usd}' >>"$state_root/spend.jsonl"
+    --arg model "$(worker_model "$w")" --arg effort "$(cat "$w/effort" 2>/dev/null)" \
+    '{day: $day, worker: $worker, model: $model, effort: $effort, usd: $usd}' >>"$state_root/spend.jsonl"
   # Past dailyWarn: "<day> <usd>" in a file, so a status bar can show it without parsing
   # the ledger. It carries its day, so it expires on its own.
   local warn today
@@ -321,8 +340,11 @@ session_of() { jq -rs 'map(.session_id // empty) | last // empty' "$1/events.jso
 
 # call <worker> <provider> <claude args...>: one claude call in its own process group, watched.
 call() {
-  local w="$1" via="$2" off pid size last=-1 quiet=0 stall left rc=0
+  local w="$1" via="$2" off pid size last=-1 quiet=0 stall left rc=0 picked=()
   shift 2
+  # Every call of the worker, follow-ups, nudges and repairs included, on the same model.
+  [ ! -f "$w/model" ] || picked+=(--model "$(cat "$w/model")")
+  [ ! -f "$w/effort" ] || picked+=(--effort "$(cat "$w/effort")")
   off="$(wc -l <"$w/events.jsonl")"
   echo "$off" >"$w/call_offset"
   if soft_limit_hit; then
@@ -335,7 +357,7 @@ call() {
     return 125
   fi
   stall="$(cfg '.stallSeconds // 600')"
-  setsid env -u WEZTERM_PANE CLAUDE_CONFIG_DIR="$worker_config" "$self" claude "$via" -p "$@" "${worker_flags[@]}" \
+  setsid env -u WEZTERM_PANE CLAUDE_CONFIG_DIR="$worker_config" "$self" claude "$via" -p "$@" "${picked[@]}" "${worker_flags[@]}" \
     --output-format stream-json --verbose >>"$w/events.jsonl" 2>>"$w/err.log" &
   pid=$!
   while kill -0 "$pid" 2>/dev/null; do
@@ -367,7 +389,7 @@ halt() {
 }
 
 cmd_run() {
-  local name="${1:-}" edit=0 scratch="" public=0 via="" budget="" schema="" task note
+  local name="${1:-}" edit=0 scratch="" public=0 via="" model="" effort="" budget="" schema="" task note arg
   [ -n "$name" ] || usage
   shift
   while :; do
@@ -375,6 +397,8 @@ cmd_run() {
       --edit) edit=1; shift ;;
       --scratch) scratch="${2:-}"; shift 2 || usage ;;
       --via) via="${2:-}"; shift 2 || usage ;;
+      --model) model="${2:-}"; shift 2 || usage ;;
+      --effort) effort="${2:-}"; shift 2 || usage ;;
       --budget) budget="${2:-}"; shift 2 || usage ;;
       --schema) schema="${2:-}"; shift 2 || usage ;;
       *) break ;;
@@ -386,12 +410,21 @@ cmd_run() {
   [ -n "$task" ] || usage
   shift
   [ "${1:-}" != "--" ] || shift
+  for arg in "$@"; do
+    case "$arg" in
+      --model | --model=* | --effort | --effort=*) die "use drovr's own ${arg%%=*} (before the task), so costs and follow-ups know it" ;;
+    esac
+  done
+  [ -n "$model" ] || model="$(cfg --arg p "$via" '.providers[$p].model')"
+  [[ "$model" =~ ^[A-Za-z0-9._:/@-]+$ ]] || die "bad model id '$model'"
+  [ -n "$effort" ] || effort="$(model_cfg "$via" "$model" | jq -r '.effort // empty')"
+  [ -z "$effort" ] || [[ " $efforts " == *" $effort "* ]] || die "--effort wants one of: $efforts"
   if [ -n "$budget" ]; then
     [[ "$budget" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [ "$(jq -n "$budget > 0")" = true ] || die "--budget wants a positive USD amount"
   fi
   if [ -n "$budget" ] || [ -n "$(cfg '.dailyBudget // .dailySoftLimit // .dailyWarn // empty')" ]; then
     # A budget is only as good as the price it is counted in; 0 is fine for a free model.
-    [ -n "$(price_of "$via")" ] || die "a budget needs a price for provider '$via' (see README)"
+    [ -n "$(price_of "$via" "$model")" ] || die "a budget needs a price for model '$model' on provider '$via' (see README)"
   fi
   ! soft_limit_hit || die "$(soft_limit_note)"
   if [ -n "$schema" ]; then
@@ -440,13 +473,16 @@ cmd_run() {
   printf '%s\n' "$repo" >"$w/repo"
   printf '%s\n' "$mode" >"$w/mode"
   printf '%s\n' "$via" >"$w/via"
+  printf '%s\n' "$model" >"$w/model"
+  [ -z "$effort" ] || printf '%s\n' "$effort" >"$w/effort"
   printf '%s\n' "$task" >"$w/task"
   [ -z "$budget" ] || printf '%s\n' "$budget" >"$w/budget"
   [ -z "$schema" ] || jq . "$schema" >"$w/schema.json"
   # The branch merge will go back into; empty when detached or in scratch mode.
   [ "$repo" = - ] || git -C "$repo" symbolic-ref --short -q HEAD >"$w/base" || : >"$w/base"
   launch "$cwd" "$w" "$via" "$task" --permission-mode "$mode" "$@"
-  echo "drovr: $name started on $via in $cwd ($mode$([ "$public" = 0 ] || echo ", public repo"))"
+  echo "drovr: $name started on $via, $model${effort:+ at $effort effort}, in $cwd ($mode$([ "$public" = 0 ] || echo ", public repo"))"
+  [ -n "$(price_of "$via" "$model")" ] || echo "drovr: no price for $model on $via, so no cost is shown (see README)" >&2
   note="$(warning)"
   [ -z "$note" ] || echo "drovr: ⚠ $note" >&2
 }
@@ -540,7 +576,7 @@ progress() {
 # plus an estimate for the one in flight.
 cost() {
   local w="$1" running=0
-  [ -n "$(price_of "$(cat "$w/via" 2>/dev/null)")" ] || return 0
+  [ -n "$(price_of "$(cat "$w/via" 2>/dev/null)" "$(worker_model "$w")")" ] || return 0
   [ -e "$w/exit" ] || running="$(call_cost "$w" "$(cat "$w/call_offset" 2>/dev/null || echo 0)")"
   jq -nr --argjson s "$(cat "$w/spent" 2>/dev/null || echo 0)" --argjson r "${running:-0}" \
     '"$" + (($s + $r) * 10000 | round / 10000 | tostring)'
@@ -563,10 +599,24 @@ cmd_list() {
       else status="failed($(cat "$w/exit"))"; fi
       detail="$(jq -r '"turn \(.num_turns // "?")" + (if (.permission_denials | length) > 0 then "  \(.permission_denials | length) denied" else "" end)' "$w/out.json" 2>/dev/null)" || detail=""
     fi
-    printf '%-16s %-12s %-9s %-9s %s\n' "$name" "$status" "$(cat "$w/via" 2>/dev/null)" "$(cost "$w")" "$detail"
+    printf '%-16s %-12s %-24s %-9s %s\n' "$name" "$status" \
+      "$(worker_model "$w" 2>/dev/null)$(sed 's/^/ /' "$w/effort" 2>/dev/null)" "$(cost "$w")" "$detail"
   done
   note="$(warning)"
   [ -z "$note" ] || echo "⚠ $note"
+}
+
+# models: one line per model a worker can be given, with peak price per 1M tokens
+# (input / output) and default effort.
+cmd_models() {
+  cfg -r --arg d "$(default_provider)" '.providers // {} | to_entries[] | .key as $p | .value as $v
+    | ([$v.model] + (($v.models // {}) | keys - [$v.model]))[] as $m
+    | ((if $m == $v.model then {price: $v.price, effort: $v.effort} else {} end) + ($v.models[$m] // {})) as $c
+    | [$p, $m,
+       (if $c.price then "$\($c.price.input)/$\($c.price.output)" else "no price" end),
+       ($c.effort // "-"),
+       (if $m == $v.model then (if $p == $d then "(default)" else "(provider default)" end) else "" end)]
+    | @tsv' | column -t -s $'\t'
 }
 
 # status: one line for a prompt or status bar ("2▶ 1✓ 1✗"), empty when idle.
@@ -673,6 +723,7 @@ main() {
     status) cmd_status ;;
     path) [ -n "${2:-}" ] || usage; cat "$(worker_dir "$2")/cwd" ;;
     providers) echo "$(providers | xargs) (default: $(default_provider))" ;;
+    models) cmd_models ;;
     claude) shift; cmd_claude "$@" ;;
     diff) shift; cmd_diff "$@" ;;
     merge) shift; cmd_merge "$@" ;;

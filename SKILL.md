@@ -71,6 +71,8 @@ drovr run <name> "<task>"                  # repo, read-only: edits and unapprov
 drovr run <name> --edit "<task>"           # repo, own worktree + branch drovr-<name>, edits auto-accepted
 drovr run <name> --scratch <dir> "<task>"  # only <dir>, copied; edits auto-accepted, no Bash
 drovr run <name> --via <p> "<task>"        # pick a provider; `drovr providers` lists them
+drovr run <name> --model <id> --effort low "<task>"  # another model of the provider; effort low..max
+drovr models                               # models per provider, with price and default effort
 drovr run <name> --budget 0.50 "<task>"    # stop it past $0.50, all its turns together
 drovr run <name> --schema <file> "<task>"  # answer must end with JSON matching the schema
 drovr wait <name> 900                      # block until the turn ends (seconds; omit = no limit)
@@ -85,6 +87,20 @@ drovr rm <name>                            # refuses while its worktree has unco
 ```
 
 Names: `[a-z][a-z0-9-]*`, unique among live workers. Repo mode runs from inside the repo.
+
+## Picking model and effort
+
+Pick per task from `drovr models`; drovr never picks for you. With DeepSeek:
+
+| Task | Model, effort |
+|---|---|
+| Mechanical: rename, move, boilerplate, apply a pattern you spelled out | `deepseek-flash`, low |
+| Default: a bounded change you will review | the provider's main model, its default effort |
+| Hard reasoning in one place, where a wrong answer costs more than tokens | main model, `--effort max` **with `--budget`** |
+
+`max` has a long tail (once 23k thinking tokens on a trivial question), so never run it
+without `--budget`. If a cheap tier's answer fails review, rerun one tier up rather than
+prompting the same worker again.
 
 ## Working with results
 

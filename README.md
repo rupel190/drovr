@@ -65,7 +65,11 @@ install -Dm644 SKILL.md ~/.claude/skills/drovr/SKILL.md   # optional
       "baseUrl": "https://api.deepseek.com/anthropic",
       "model": "deepseek-v4-pro",
       "keyFile": "/path/to/deepseek-key",
-      "price": { "input": 1.32, "cachedInput": 0.044, "output": 3.96 }
+      "price": { "input": 1.32, "cachedInput": 0.044, "output": 3.96 },
+      "effort": "medium",
+      "models": {
+        "deepseek-flash": { "price": { "input": 0.3, "cachedInput": 0.006, "output": 1.2 }, "effort": "low" }
+      }
     }
   }
 }
@@ -74,6 +78,8 @@ install -Dm644 SKILL.md ~/.claude/skills/drovr/SKILL.md   # optional
 The key is read from `keyFile` at launch, never stored in the config. `authVar` picks
 `ANTHROPIC_AUTH_TOKEN` (default) or `ANTHROPIC_API_KEY`; `price` (USD per 1M tokens) is
 optional and fills the cost column of `drovr list`. Budgets need it; use 0 for a free model.
+`effort` is the main model's default effort; `models` lists the provider's other models,
+each with its own price and default effort (see [Models and effort](#models-and-effort)).
 
 Optional top-level keys: `stallSeconds` (default 600, 0 turns it off), `dailyWarn`,
 `dailySoftLimit` and `dailyBudget` (USD per day, all workers together) and `nudge` (default
@@ -101,7 +107,8 @@ The module writes the config, installs the skill, and adds `claude-<name>` short
 ## Usage
 
 ```bash
-drovr run <name> [--edit | --scratch <dir>] [--via <provider>] [--budget <usd>] [--schema <file>] "<task>"
+drovr run <name> [--edit | --scratch <dir>] [--via <provider>] [--model <id>] [--effort <level>]
+          [--budget <usd>] [--schema <file>] "<task>"
 drovr wait <name> [seconds]
 drovr read <name>        # answer, then any denied tool calls
 drovr read <name> --json # only the schema-checked JSON (--schema workers)
@@ -110,12 +117,29 @@ drovr list               # each worker: status, cost, turn, current action
 drovr status             # one line for a prompt or status bar: "2▶ 1✓ 1✗"
 drovr diff <name>        # what a repo worker changed
 drovr merge <name> [-m <msg>]  # --edit worker: commit (as one commit with <msg>), merge into its start branch, clean up
+drovr models             # each provider's models: price per 1M tokens (in/out), default effort
 drovr claude <provider>  # Claude Code against a provider, for a quick check
 drovr path <name> | providers | rm <name>
 ```
 
 For WezTerm, `weztermHelper = true` installs `~/.local/share/drovr/wezterm.lua`, which
 reads drovr's state without spawning a process (usage in the file's header).
+
+## Models and effort
+
+`--model <id>` runs a worker on another model of the same provider, and `--effort
+low|medium|high|xhigh|max` sets how much it thinks; without them it gets the model's
+defaults from the config. Both hold for every call of that worker, follow-ups, nudges and
+repairs included, and `drovr list` and the spend ledger record them. Pass them to drovr,
+not after `--`: drovr refuses `-- --model`, because costs and follow-ups would not know.
+
+Each model is priced on its own. A model with no `models` entry has no price, so its cost
+stays blank and it cannot carry a budget: drovr never charges it at the provider's price.
+
+Measured on DeepSeek V4 Pro (2026-10, one short arithmetic task, four runs each): every
+`max` run thought longer than every `low` run, typically 2–3×, but one `max` run spent 23k
+thinking tokens on a question the others answered in under 1k. Give `max` a `--budget`.
+Whether more effort gives better answers was not measured.
 
 ## Supervision
 

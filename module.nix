@@ -57,6 +57,32 @@ let
     };
   };
 
+  effort = lib.types.nullOr (
+    lib.types.enum [
+      "low"
+      "medium"
+      "high"
+      "xhigh"
+      "max"
+    ]
+  );
+
+  # A model besides the provider's main one, for `drovr run --model`.
+  extraModel = lib.types.submodule {
+    options = {
+      price = lib.mkOption {
+        type = lib.types.nullOr price;
+        default = null;
+        description = "Token prices of this model. Without one its cost is not shown and it cannot carry a budget; it never falls back to the provider's price.";
+      };
+      effort = lib.mkOption {
+        type = effort;
+        default = null;
+        description = "Default effort for this model; `drovr run --effort` overrides it.";
+      };
+    };
+  };
+
   provider = lib.types.submodule {
     options = {
       baseUrl = lib.mkOption {
@@ -87,6 +113,26 @@ let
           input = 0.66;
           cachedInput = 0.022;
           output = 1.98;
+        };
+      };
+      effort = lib.mkOption {
+        type = effort;
+        default = null;
+        description = "Default effort for the provider's main model; null leaves it to Claude Code.";
+      };
+      models = lib.mkOption {
+        type = lib.types.attrsOf extraModel;
+        default = { };
+        description = "Other models of this provider, by model id, each with its own price and default effort.";
+        example = {
+          deepseek-flash = {
+            price = {
+              input = 0.3;
+              cachedInput = 0.006;
+              output = 1.2;
+            };
+            effort = "low";
+          };
         };
       };
       authVar = lib.mkOption {

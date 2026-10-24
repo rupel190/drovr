@@ -30,7 +30,8 @@ cat >"$XDG_CONFIG_HOME/drovr/config.json" <<EOF
   "allowedRepos": ["$tmp/priv"],
   "providers": {
     "deep": { "baseUrl": "https://deep.example/anthropic", "model": "deep-pro", "keyFile": "$tmp/key",
-              "price": { "input": 1, "cachedInput": 0.1, "output": 2 } },
+              "price": { "input": 1, "cachedInput": 0.1, "output": 2 }, "effort": "medium",
+              "models": { "deep-flash": { "price": { "input": 0.5, "output": 1 }, "effort": "low" } } },
     "alt":  { "baseUrl": "https://alt.example", "model": "alt-1", "keyFile": "$tmp/key", "authVar": "ANTHROPIC_API_KEY" },
     "nokey": { "baseUrl": "https://x.example", "model": "x", "keyFile": "$tmp/missing" }
   }
@@ -97,6 +98,32 @@ expect "list shows cost over both turns" '$6.2' d list
 expect "list shows turns" "turn 2" d list
 expect "status counts" "2✓" d status
 
+# models and effort: per-model price and default effort, kept across follow-ups
+expect "models lists the provider's model with its defaults" "deep-pro*\$1/\$2*medium*(default)" d models
+expect "and the extra model with its own" "deep-flash*\$0.5/\$1*low" d models
+grep -q -- "--model deep-pro --effort medium" "$STUB_LOG" && ok "default run passes the provider's model and effort" || no "default model flags"
+: >"$STUB_LOG"
+expect "run names model and effort" "deep-flash at low effort" in_dir "$tmp/brief" d run fl --scratch "$tmp/brief" --model deep-flash "t"
+d wait fl 20 >/dev/null
+grep -q -- "--model deep-flash --effort low" "$STUB_LOG" && ok "model's own default effort" || no "flash flags" "$(cat "$STUB_LOG")"
+# 1M in x 0.5 + 1M cached x 0.5 (no cachedInput: charged as input) + 1M out x 1 = 2
+expect "cost uses the model's price, not the provider's" "deep-flash low*\$2 " d list
+grep -q '"model":"deep-flash","effort":"low"' "$XDG_STATE_HOME/drovr/spend.jsonl" && ok "ledger records model and effort" || no "ledger model"
+: >"$STUB_LOG"
+d prompt fl "more" >/dev/null
+d wait fl 20 >/dev/null
+grep -q -- "--resume sid-new.*--model deep-flash --effort low" "$STUB_LOG" && ok "follow-up keeps model and effort" || no "follow-up flags" "$(cat "$STUB_LOG")"
+: >"$STUB_LOG"
+in_dir "$tmp/brief" d run fx --scratch "$tmp/brief" --model deep-flash --effort max "t" >/dev/null
+d wait fx 20 >/dev/null
+grep -q -- "--model deep-flash --effort max" "$STUB_LOG" && ok "--effort overrides the default" || no "effort override"
+expect "bad effort is refused" "wants one of: low medium high xhigh max" in_dir "$tmp/brief" d run fb --scratch "$tmp/brief" --effort huge "t"
+expect "unpriced model cannot carry a budget" "needs a price for model 'zzz-1' on provider 'deep'" in_dir "$tmp/brief" d run fz --scratch "$tmp/brief" --model zzz-1 --budget 1 "t"
+expect "unpriced model runs, with a note" "no price for zzz-1 on deep" in_dir "$tmp/brief" d run fu --scratch "$tmp/brief" --model zzz-1 "t"
+d wait fu 20 >/dev/null
+expect "passthrough --model is refused" "use drovr's own --model" in_dir "$tmp/brief" d run fp --scratch "$tmp/brief" "t" -- --model=x
+expect "passthrough --effort is refused" "use drovr's own --effort" in_dir "$tmp/brief" d run fp --scratch "$tmp/brief" "t" -- --effort low
+
 # edit mode and rm
 expect "edit mode starts" "acceptEdits" in_dir "$tmp/priv" d run ed --edit --via alt "edit"
 d wait ed 20 >/dev/null
@@ -162,7 +189,7 @@ pgrep -f "sleep 60" >/dev/null && no "stalled worker's process group is gone" ||
 
 # budget: one wallet per worker, plus a daily one, both only shrinking
 expect "budget must be a number" "positive USD" in_dir "$tmp/brief" d run b0 --scratch "$tmp/brief" --budget abc "t"
-expect "budget needs a price" "needs a price for provider 'alt'" in_dir "$tmp/brief" d run b1 --scratch "$tmp/brief" --via alt --budget 1 "t"
+expect "budget needs a price" "needs a price for model 'alt-1' on provider 'alt'" in_dir "$tmp/brief" d run b1 --scratch "$tmp/brief" --via alt --budget 1 "t"
 d run bg --scratch "$tmp/brief" --budget 1 "spend" >/dev/null
 d wait bg 30 >/dev/null
 [ "$(cat "$XDG_STATE_HOME/drovr/bg/exit")" = 124 ] && ok "worker past its budget is stopped" || no "budget exit"
